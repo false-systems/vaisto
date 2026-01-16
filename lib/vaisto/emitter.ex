@@ -482,6 +482,7 @@ defmodule Vaisto.Emitter do
   end
 
   defp emit_pattern({:lit, :atom, a}), do: a
+  defp emit_pattern({:atom, a}), do: a  # Wrapped atom from parser
   defp emit_pattern(a) when is_atom(a), do: a
   defp emit_pattern(n) when is_integer(n), do: n
 
