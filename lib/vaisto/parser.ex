@@ -120,16 +120,38 @@ defmodule Vaisto.Parser do
     parse_list(tail, acc ++ [parse_token(token)])
   end
 
-  # Parse bracket contents [...] - used for let bindings
-  defp parse_bracket(["]" | tail], acc), do: {tail, acc}
+  # Parse bracket contents [...] - used for let bindings and patterns
+  # After accumulating, check for cons pattern: [h | t] → {:cons, h, t}
+  defp parse_bracket(["]" | tail], acc) do
+    result = normalize_bracket_pattern(acc)
+    {tail, result}
+  end
 
   defp parse_bracket(["(" | tail], acc) do
     {rest, nested} = parse_list(tail, [])
     parse_bracket(rest, acc ++ [nested])
   end
 
+  defp parse_bracket(["[" | tail], acc) do
+    # Nested bracket (e.g., [[]] for empty list pattern)
+    {rest, nested} = parse_bracket(tail, [])
+    parse_bracket(rest, acc ++ [nested])
+  end
+
   defp parse_bracket([token | tail], acc) do
     parse_bracket(tail, acc ++ [parse_token(token)])
+  end
+
+  # Normalize bracket contents: detect cons pattern [h | t] → {:cons, h, t}
+  defp normalize_bracket_pattern(acc) do
+    case acc do
+      # Cons pattern: [h | t] where | is in the middle
+      [head, :|, tail] -> {:cons, head, tail}
+      # Empty list stays as empty list
+      [] -> []
+      # Regular list of elements (for let bindings, param lists, etc.)
+      _ -> acc
+    end
   end
 
   # Special form parsers
@@ -169,7 +191,8 @@ defmodule Vaisto.Parser do
 
   # (defn add [x y] (+ x y)) → {:defn, :add, [{:x, :any}, {:y, :any}], body}
   # (defn add [x :int y :int] (+ x y)) → {:defn, :add, [{:x, :int}, {:y, :int}], body}
-  defp parse_defn([name, {:bracket, params}, body]) do
+  # Single-clause: name, params bracket, non-bracket body
+  defp parse_defn([name, {:bracket, params}, body]) when not is_tuple(body) or elem(body, 0) != :bracket do
     # Check if params look like typed (name :type pairs) or untyped (just names)
     typed_params = if looks_typed?(params) do
       # Parse as pairs: [x :int y :int] → [{:x, :int}, {:y, :int}]
@@ -187,20 +210,30 @@ defmodule Vaisto.Parser do
   # (defn len
   #   [[] 0]
   #   [[h | t] (+ 1 (len t))])
+  # All clauses are brackets: [pattern body]
   defp parse_defn([name | clauses]) when is_list(clauses) and length(clauses) > 0 do
-    # Check if this is multi-clause style (list of bracket clauses)
-    case clauses do
-      [{:bracket, _} | _] ->
-        # Multi-clause function
-        parsed_clauses = Enum.map(clauses, fn {:bracket, [pattern, body]} ->
-          {pattern, body}
-        end)
-        {:defn_multi, name, parsed_clauses}
-      _ ->
-        # Fallback - shouldn't happen with well-formed input
-        {:error, "Invalid defn syntax"}
+    # Check if this is multi-clause style (all elements are brackets)
+    all_brackets? = Enum.all?(clauses, fn
+      {:bracket, _} -> true
+      _ -> false
+    end)
+
+    if all_brackets? do
+      # Multi-clause function - each clause is [pattern body]
+      parsed_clauses = Enum.map(clauses, fn {:bracket, clause_content} ->
+        extract_pattern_body(clause_content)
+      end)
+      {:defn_multi, name, parsed_clauses}
+    else
+      # Single clause with bracket body (unlikely but handle gracefully)
+      {:error, "Invalid defn syntax"}
     end
   end
+
+  # Extract pattern and body from a clause
+  # Clause content is [pattern, body] where pattern is already normalized
+  # [] → empty list, {:cons, h, t} → cons pattern, etc.
+  defp extract_pattern_body([pattern, body]), do: {pattern, body}
 
   # Check if params list looks like typed pairs (alternating atoms and types)
   defp looks_typed?(params) when length(params) >= 2 do

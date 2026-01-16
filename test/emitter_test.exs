@@ -558,5 +558,104 @@ defmodule Vaisto.EmitterTest do
       # 3^2 + 4^2 = 9 + 16 = 25
       assert Vec2E2E.main() == 25
     end
+
+    # --- Multi-clause function tests ---
+
+    test "multi-clause function with list patterns" do
+      code = """
+      (defn len
+        [[] 0]
+        [[h | t] (+ 1 (len t))])
+      (len (list 1 2 3 4 5))
+      """
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :module, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, LenE2E, _} = Emitter.compile(typed_ast, LenE2E)
+
+      assert LenE2E.main() == 5
+    end
+
+    test "multi-clause sum function" do
+      code = """
+      (defn sum
+        [[] 0]
+        [[h | t] (+ h (sum t))])
+      (sum (list 1 2 3 4 5))
+      """
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :module, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, SumMultiE2E, _} = Emitter.compile(typed_ast, SumMultiE2E)
+
+      # 1 + 2 + 3 + 4 + 5 = 15
+      assert SumMultiE2E.main() == 15
+    end
+
+    test "multi-clause last element function" do
+      code = """
+      (defn last
+        [[x] x]
+        [[h | t] (last t)])
+      (last (list 1 2 3 4 5))
+      """
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :module, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, LastE2E, _} = Emitter.compile(typed_ast, LastE2E)
+
+      assert LastE2E.main() == 5
+    end
+
+    # --- Anonymous function tests ---
+
+    test "anonymous function with map" do
+      code = """
+      (map (fn [x] (* x 2)) (list 1 2 3 4 5))
+      """
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, {:list, :int}, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, AnonMapE2E, _} = Emitter.compile(typed_ast, AnonMapE2E)
+
+      assert AnonMapE2E.main() == [2, 4, 6, 8, 10]
+    end
+
+    test "anonymous function with filter" do
+      code = """
+      (filter (fn [x] (> x 2)) (list 1 2 3 4 5))
+      """
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, {:list, :int}, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, AnonFilterE2E, _} = Emitter.compile(typed_ast, AnonFilterE2E)
+
+      assert AnonFilterE2E.main() == [3, 4, 5]
+    end
+
+    test "anonymous function with fold" do
+      code = """
+      (fold (fn [acc x] (+ acc x)) 0 (list 1 2 3 4 5))
+      """
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :int, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, AnonFoldE2E, _} = Emitter.compile(typed_ast, AnonFoldE2E)
+
+      assert AnonFoldE2E.main() == 15
+    end
+
+    test "chained anonymous functions" do
+      code = """
+      (filter (fn [x] (> x 5)) (map (fn [x] (* x 2)) (list 1 2 3 4 5)))
+      """
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, {:list, :int}, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, ChainAnonE2E, _} = Emitter.compile(typed_ast, ChainAnonE2E)
+
+      # [1,2,3,4,5] -> [2,4,6,8,10] -> [6,8,10]
+      assert ChainAnonE2E.main() == [6, 8, 10]
+    end
   end
 end

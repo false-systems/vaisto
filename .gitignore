@@ -23,3 +23,4 @@ Thumbs.db
 
 # Vaisto compiled output
 *.va.beam
+/vaistoc

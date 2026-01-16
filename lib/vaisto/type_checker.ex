@@ -457,11 +457,14 @@ defmodule Vaisto.TypeChecker do
   # (defn len [[] 0] [[h | t] (+ 1 (len t))])
   def check({:defn_multi, name, clauses}, env) do
     # Determine arity from first clause pattern
+    # List patterns ([], [h|t], {:list, ...}) → arity 1 (single list argument)
+    # Record patterns ({:call, name, args}) → arity = length(args)
     {first_pattern, _} = hd(clauses)
     arity = case first_pattern do
-      {:list, elems} -> length(elems)
-      {:call, _, args} -> length(args)
-      _ when is_list(first_pattern) -> length(first_pattern)
+      [] -> 1  # Empty list pattern
+      {:cons, _, _} -> 1  # Cons pattern [h | t]
+      {:list, _} -> 1  # List literal pattern
+      {:call, _, args} -> length(args)  # Record pattern
       _ -> 1
     end
 
@@ -640,8 +643,18 @@ defmodule Vaisto.TypeChecker do
   # --- Multi-clause function helpers ---
 
   # Extract bindings from patterns in multi-clause functions
+  # Empty list pattern: []
+  defp extract_multi_pattern_bindings([]), do: []
+  # Non-empty list pattern from parser: [x] parses as [:x]
+  defp extract_multi_pattern_bindings(elems) when is_list(elems) do
+    Enum.flat_map(elems, &extract_multi_pattern_bindings/1)
+  end
   defp extract_multi_pattern_bindings({:list, elements}) do
     Enum.flat_map(elements, &extract_multi_pattern_bindings/1)
+  end
+  # Cons pattern: {:cons, head, tail}
+  defp extract_multi_pattern_bindings({:cons, head, tail}) do
+    extract_multi_pattern_bindings(head) ++ extract_multi_pattern_bindings(tail)
   end
   defp extract_multi_pattern_bindings({:call, _name, args}) do
     Enum.flat_map(args, &extract_multi_pattern_bindings/1)
@@ -652,12 +665,27 @@ defmodule Vaisto.TypeChecker do
   defp extract_multi_pattern_bindings(_), do: []
 
   # Type a pattern for multi-clause function
+  # Empty list pattern: [] → {:list, [], {:list, :any}}
+  defp type_multi_pattern([], _env) do
+    {:list, [], {:list, :any}}
+  end
   defp type_multi_pattern({:list, []}, _env) do
     {:list, [], {:list, :any}}
   end
   defp type_multi_pattern({:list, elements}, env) do
     typed_elements = Enum.map(elements, &type_multi_pattern(&1, env))
     {:list, typed_elements, {:list, :any}}
+  end
+  # List literal pattern from parser: [x] parses as [:x]
+  defp type_multi_pattern(elems, env) when is_list(elems) and elems != [] do
+    typed_elements = Enum.map(elems, &type_multi_pattern(&1, env))
+    {:list, typed_elements, {:list, :any}}
+  end
+  # Cons pattern: {:cons, head, tail} → {:cons, typed_head, typed_tail, type}
+  defp type_multi_pattern({:cons, head, tail}, env) do
+    typed_head = type_multi_pattern(head, env)
+    typed_tail = type_multi_pattern(tail, env)
+    {:cons, typed_head, typed_tail, {:list, :any}}
   end
   defp type_multi_pattern({:call, name, args}, env) do
     typed_args = Enum.map(args, &type_multi_pattern(&1, env))
