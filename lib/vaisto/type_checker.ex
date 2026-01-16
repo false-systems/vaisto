@@ -34,6 +34,50 @@ defmodule Vaisto.TypeChecker do
   end
 
   @doc """
+  Check types with source code for rich error formatting.
+  Returns {:ok, type, typed_ast} or {:error, formatted_string}.
+
+  The error string will be in Rust-style diagnostic format:
+
+      error: type mismatch: expected Int, found Atom
+        --> test.va:1:6
+        |
+      1 | (+ 1 :atom)
+        |      ^^^^^
+  """
+  def check_with_source(ast, source, env \\ @primitives) do
+    case check(ast, env) do
+      {:ok, _, _} = success -> success
+      {:error, msg} ->
+        case Vaisto.ErrorFormatter.parse_legacy_error(msg) do
+          nil ->
+            # Can't parse, return as-is
+            {:error, msg}
+          error_map ->
+            {:error, Vaisto.ErrorFormatter.format(error_map, source)}
+        end
+    end
+  end
+
+  @doc """
+  Infer types using Hindley-Milner algorithm.
+
+  This uses Algorithm W to infer types without explicit annotations.
+  Supports let-polymorphism for generic functions.
+
+  ## Examples
+
+      iex> TypeChecker.infer({:fn, [:x], :x})
+      {:ok, {:fn, [{:tvar, 0}], {:tvar, 0}}, _ast}  # identity: a -> a
+
+      iex> TypeChecker.infer({:fn, [:x], {:call, :+, [:x, 1]}})
+      {:ok, {:fn, [:int], :int}, _ast}  # inferred int -> int
+  """
+  def infer(ast, env \\ @primitives) do
+    Vaisto.TypeSystem.Infer.infer(ast, env)
+  end
+
+  @doc """
   Check types and return {:ok, type, typed_ast} or {:error, reason}.
   """
   def check(ast, env \\ @primitives)
@@ -42,6 +86,25 @@ defmodule Vaisto.TypeChecker do
   def check(forms, env) when is_list(forms) do
     check_module(forms, env, [])
   end
+
+  # Normalize AST nodes that have location metadata attached
+  # Strip location from tuples to allow pattern matching on the core AST shape
+  # Location is captured for error messages via with_loc/2
+  def check({:call, func, args, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:call, func, args}, env), loc)
+  def check({:if, cond, then_b, else_b, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:if, cond, then_b, else_b}, env), loc)
+  def check({:let, bindings, body, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:let, bindings, body}, env), loc)
+  def check({:match, expr, clauses, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:match, expr, clauses}, env), loc)
+  def check({:receive, clauses, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:receive, clauses}, env), loc)
+  def check({:process, name, init, handlers, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:process, name, init, handlers}, env), loc)
+  def check({:supervise, strategy, children, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:supervise, strategy, children}, env), loc)
+  def check({:def, name, args, body, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:def, name, args, body}, env), loc)
+  def check({:defn, name, params, body, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:defn, name, params, body}, env), loc)
+  def check({:defn_multi, name, clauses, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:defn_multi, name, clauses}, env), loc)
+  def check({:deftype, name, fields, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:deftype, name, fields}, env), loc)
+  def check({:fn, params, body, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:fn, params, body}, env), loc)
+  def check({:extern, mod, func, arg_types, ret_type, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:extern, mod, func, arg_types, ret_type}, env), loc)
+  def check({:list, elements, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:list, elements}, env), loc)
+  def check({:unit, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:unit}, env), loc)
 
   # Literals
   def check(n, _env) when is_integer(n), do: {:ok, :int, {:lit, :int, n}}
@@ -214,7 +277,10 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
-  # map with anonymous function
+  # map with anonymous function (either 3-tuple or 4-tuple with location)
+  def check({:call, :map, [{:fn, _, _, _} = fn_expr, list_expr]}, env) do
+    check({:call, :map, [strip_fn_loc(fn_expr), list_expr]}, env)
+  end
   def check({:call, :map, [{:fn, _, _} = fn_expr, list_expr]}, env) do
     with {:ok, func_type, typed_fn} <- check(fn_expr, env),
          {:ok, list_type, typed_list} <- check(list_expr, env) do
@@ -260,7 +326,10 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
-  # filter with anonymous function
+  # filter with anonymous function (either 3-tuple or 4-tuple with location)
+  def check({:call, :filter, [{:fn, _, _, _} = fn_expr, list_expr]}, env) do
+    check({:call, :filter, [strip_fn_loc(fn_expr), list_expr]}, env)
+  end
   def check({:call, :filter, [{:fn, _, _} = fn_expr, list_expr]}, env) do
     with {:ok, func_type, typed_fn} <- check(fn_expr, env),
          {:ok, list_type, typed_list} <- check(list_expr, env) do
@@ -305,7 +374,10 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
-  # fold with anonymous function
+  # fold with anonymous function (either 3-tuple or 4-tuple with location)
+  def check({:call, :fold, [{:fn, _, _, _} = fn_expr, init_expr, list_expr]}, env) do
+    check({:call, :fold, [strip_fn_loc(fn_expr), init_expr, list_expr]}, env)
+  end
   def check({:call, :fold, [{:fn, _, _} = fn_expr, init_expr, list_expr]}, env) do
     with {:ok, func_type, typed_fn} <- check(fn_expr, env),
          {:ok, init_type, typed_init} <- check(init_expr, env),
@@ -476,17 +548,25 @@ defmodule Vaisto.TypeChecker do
   end
 
   # Anonymous function: (fn [x] (* x 2))
+  # Uses Hindley-Milner inference to determine parameter types
   def check({:fn, params, body}, env) do
-    # Create env with parameters bound to :any
-    param_types = Enum.map(params, fn _ -> :any end)
-    param_env = Enum.zip(params, param_types) |> Map.new()
-    extended_env = Map.merge(env, param_env)
+    # Try inference first for better type information
+    case Vaisto.TypeSystem.Infer.infer({:fn, params, body}, env) do
+      {:ok, func_type, typed_ast} ->
+        {:ok, func_type, typed_ast}
 
-    case check(body, extended_env) do
-      {:ok, ret_type, typed_body} ->
-        func_type = {:fn, param_types, ret_type}
-        {:ok, func_type, {:fn, params, typed_body, func_type}}
-      error -> error
+      {:error, _} ->
+        # Fall back to :any for params if inference fails
+        param_types = Enum.map(params, fn _ -> :any end)
+        param_env = Enum.zip(params, param_types) |> Map.new()
+        extended_env = Map.merge(env, param_env)
+
+        case check(body, extended_env) do
+          {:ok, ret_type, typed_body} ->
+            func_type = {:fn, param_types, ret_type}
+            {:ok, func_type, {:fn, params, typed_body, func_type}}
+          error -> error
+        end
     end
   end
 
@@ -564,6 +644,28 @@ defmodule Vaisto.TypeChecker do
   defp parse_type_expr({:call, :List, [elem_type]}), do: {:list, parse_type_expr(elem_type)}
   # Fallback
   defp parse_type_expr(other), do: other
+
+  # Strip location from fn AST nodes
+  defp strip_fn_loc({:fn, params, body, %Vaisto.Parser.Loc{}}), do: {:fn, params, body}
+  defp strip_fn_loc(other), do: other
+
+  # Add location to error messages
+  # Pass through success results, enhance error messages with line/column
+  # Only add location if the error message doesn't already have one (starts with digit:)
+  defp with_loc({:ok, _, _} = result, _loc), do: result
+  defp with_loc({:error, msg}, %Vaisto.Parser.Loc{line: line, col: col, file: file}) do
+    # Check if error already has location (format: "line:col:" or "file:line:col:")
+    if String.match?(msg, ~r/^\d+:\d+:/) or String.match?(msg, ~r/^[^:]+:\d+:\d+:/) do
+      # Error already has location, pass through
+      {:error, msg}
+    else
+      prefix = case file do
+        nil -> "#{line}:#{col}"
+        f -> "#{f}:#{line}:#{col}"
+      end
+      {:error, "#{prefix}: #{msg}"}
+    end
+  end
 
   # Helper functions
 
@@ -665,6 +767,11 @@ defmodule Vaisto.TypeChecker do
   # Extract variable bindings from a pattern with proper types
   # (point x y) matching against {:record, :point, [{:x, :int}, {:y, :int}]}
   # gives [{:x, :int}, {:y, :int}]
+  # Normalize patterns with location
+  defp extract_pattern_bindings({:call, name, args, %Vaisto.Parser.Loc{}}, type, env) do
+    extract_pattern_bindings({:call, name, args}, type, env)
+  end
+
   defp extract_pattern_bindings({:call, record_name, args}, {:record, record_name, fields}, _env) do
     Enum.zip(args, fields)
     |> Enum.filter(fn {arg, _field} -> is_atom(arg) and arg not in [:_, true, false] end)
@@ -692,6 +799,11 @@ defmodule Vaisto.TypeChecker do
   defp extract_pattern_bindings(_, _, _), do: []
 
   # Type a pattern for the typed AST
+  # Normalize patterns with location metadata first
+  defp type_pattern({:call, record_name, args, %Vaisto.Parser.Loc{}}, expected_type, env) do
+    type_pattern({:call, record_name, args}, expected_type, env)
+  end
+
   # Uses field types from the record definition
   defp type_pattern({:call, record_name, args}, {:record, record_name, fields}, _env) do
     typed_args = Enum.zip(args, fields)
@@ -882,61 +994,38 @@ defmodule Vaisto.TypeChecker do
 
   defp check_module(forms, env, acc) when is_list(forms) and acc == [] do
     # First pass: collect all signatures
+    # Patterns handle both with and without location metadata
     env_with_signatures = Enum.reduce(forms, env, fn form, acc_env ->
       case form do
+        {:defn, name, params, _body, %Vaisto.Parser.Loc{}} ->
+          collect_defn_signature(name, params, acc_env)
+
         {:defn, name, params, _body} ->
-          # Params are now [{:x, :int}, {:y, :int}] tuples
-          param_types = Enum.map(params, fn {_name, type} -> type end)
-          func_type = {:fn, param_types, :any}
-          Map.put(acc_env, name, func_type)
+          collect_defn_signature(name, params, acc_env)
+
+        {:defn_multi, name, clauses, %Vaisto.Parser.Loc{}} ->
+          collect_defn_multi_signature(name, clauses, acc_env)
 
         {:defn_multi, name, clauses} ->
-          # Determine arity from first clause
-          {first_pattern, _} = hd(clauses)
-          arity = case first_pattern do
-            {:list, elems} -> length(elems)
-            {:call, _, args} -> length(args)
-            _ when is_list(first_pattern) -> length(first_pattern)
-            _ -> 1
-          end
-          param_types = List.duplicate(:any, arity)
-          func_type = {:fn, param_types, :any}
-          Map.put(acc_env, name, func_type)
+          collect_defn_multi_signature(name, clauses, acc_env)
+
+        {:deftype, name, fields, %Vaisto.Parser.Loc{}} ->
+          collect_deftype_signature(name, fields, acc_env)
 
         {:deftype, name, fields} ->
-          # Fields are now [{:x, {:atom, :int}}, {:y, {:atom, :int}}] tuples
-          # Normalize field types using parse_type_expr
-          normalized_fields = Enum.map(fields, fn {field_name, type} ->
-            {field_name, parse_type_expr(type)}
-          end)
-          field_types = Enum.map(normalized_fields, fn {_name, type} -> type end)
-          record_type = {:record, name, normalized_fields}
-          constructor_type = {:fn, field_types, record_type}
-          Map.put(acc_env, name, constructor_type)
+          collect_deftype_signature(name, fields, acc_env)
+
+        {:process, name, initial_state, handlers, %Vaisto.Parser.Loc{}} ->
+          collect_process_signature(name, initial_state, handlers, acc_env)
 
         {:process, name, initial_state, handlers} ->
-          # Infer process type from handlers
-          # Unwrap {:atom, msg} if present
-          msg_types = Enum.map(handlers, fn
-            {{:atom, msg}, _body} -> msg
-            {msg, _body} -> msg
-          end)
-          # Rough state type from initial_state
-          state_type = case initial_state do
-            n when is_integer(n) -> :int
-            f when is_float(f) -> :float
-            _ -> :any
-          end
-          process_type = {:process, state_type, msg_types}
-          Map.put(acc_env, name, process_type)
+          collect_process_signature(name, initial_state, handlers, acc_env)
+
+        {:extern, mod, func, arg_types, ret_type, %Vaisto.Parser.Loc{}} ->
+          collect_extern_signature(mod, func, arg_types, ret_type, acc_env)
 
         {:extern, mod, func, arg_types, ret_type} ->
-          # Register extern function under "mod:func" key
-          extern_name = :"#{mod}:#{func}"
-          parsed_arg_types = Enum.map(arg_types, &parse_type_expr/1)
-          parsed_ret_type = parse_type_expr(ret_type)
-          func_type = {:fn, parsed_arg_types, parsed_ret_type}
-          Map.put(acc_env, extern_name, func_type)
+          collect_extern_signature(mod, func, arg_types, ret_type, acc_env)
 
         _ ->
           acc_env
@@ -945,6 +1034,68 @@ defmodule Vaisto.TypeChecker do
 
     # Second pass: type-check each form with full environment
     check_module_forms(forms, env_with_signatures, [])
+  end
+
+  # Signature collection helpers
+  defp collect_defn_signature(name, params, env) do
+    # Params are now [{:x, :int}, {:y, :int}] tuples
+    param_types = Enum.map(params, fn {_name, type} -> type end)
+    func_type = {:fn, param_types, :any}
+    Map.put(env, name, func_type)
+  end
+
+  defp collect_defn_multi_signature(name, clauses, env) do
+    # Determine arity from first clause
+    {first_pattern, _} = hd(clauses)
+    arity = case first_pattern do
+      {:list, elems} -> length(elems)
+      {:list, elems, _loc} -> length(elems)
+      {:call, _, args} -> length(args)
+      {:call, _, args, _loc} -> length(args)
+      _ when is_list(first_pattern) -> length(first_pattern)
+      _ -> 1
+    end
+    param_types = List.duplicate(:any, arity)
+    func_type = {:fn, param_types, :any}
+    Map.put(env, name, func_type)
+  end
+
+  defp collect_deftype_signature(name, fields, env) do
+    # Fields are now [{:x, {:atom, :int}}, {:y, {:atom, :int}}] tuples
+    # Normalize field types using parse_type_expr
+    normalized_fields = Enum.map(fields, fn {field_name, type} ->
+      {field_name, parse_type_expr(type)}
+    end)
+    field_types = Enum.map(normalized_fields, fn {_name, type} -> type end)
+    record_type = {:record, name, normalized_fields}
+    constructor_type = {:fn, field_types, record_type}
+    Map.put(env, name, constructor_type)
+  end
+
+  defp collect_process_signature(name, initial_state, handlers, env) do
+    # Infer process type from handlers
+    # Unwrap {:atom, msg} if present
+    msg_types = Enum.map(handlers, fn
+      {{:atom, msg}, _body} -> msg
+      {msg, _body} -> msg
+    end)
+    # Rough state type from initial_state
+    state_type = case initial_state do
+      n when is_integer(n) -> :int
+      f when is_float(f) -> :float
+      _ -> :any
+    end
+    process_type = {:process, state_type, msg_types}
+    Map.put(env, name, process_type)
+  end
+
+  defp collect_extern_signature(mod, func, arg_types, ret_type, env) do
+    # Register extern function under "mod:func" key
+    extern_name = :"#{mod}:#{func}"
+    parsed_arg_types = Enum.map(arg_types, &parse_type_expr/1)
+    parsed_ret_type = parse_type_expr(ret_type)
+    func_type = {:fn, parsed_arg_types, parsed_ret_type}
+    Map.put(env, extern_name, func_type)
   end
 
   defp check_module_forms([], _env, acc) do

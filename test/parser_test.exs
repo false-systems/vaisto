@@ -8,11 +8,14 @@ defmodule Vaisto.ParserTest do
     end
 
     test "parses simple call" do
-      assert Parser.parse("(+ 1 2)") == {:call, :+, [1, 2]}
+      # Calls now include location as last element
+      assert {:call, :+, [1, 2], %Vaisto.Parser.Loc{line: 1, col: 1}} = Parser.parse("(+ 1 2)")
     end
 
     test "parses nested calls" do
-      assert Parser.parse("(+ 1 (* 2 3))") == {:call, :+, [1, {:call, :*, [2, 3]}]}
+      result = Parser.parse("(+ 1 (* 2 3))")
+      assert {:call, :+, [1, inner], %Vaisto.Parser.Loc{line: 1, col: 1}} = result
+      assert {:call, :*, [2, 3], %Vaisto.Parser.Loc{line: 1, col: 6}} = inner
     end
 
     test "parses atoms with colon" do
@@ -26,18 +29,19 @@ defmodule Vaisto.ParserTest do
       code = "(process counter 0 :increment (+ state 1))"
       result = Parser.parse(code)
 
-      assert {:process, :counter, 0, handlers} = result
-      # Atom handler names are now wrapped
-      assert [{{:atom, :increment}, {:call, :+, [:state, 1]}}] = handlers
+      # Process now includes location
+      assert {:process, :counter, 0, handlers, %Vaisto.Parser.Loc{}} = result
+      # Atom handler names are now wrapped, handler body has location
+      assert [{{:atom, :increment}, {:call, :+, [:state, 1], %Vaisto.Parser.Loc{}}}] = handlers
     end
 
     test "parses supervision tree" do
       code = "(supervise :one_for_one (counter 0))"
       result = Parser.parse(code)
 
-      # Atom strategy is now wrapped
-      assert {:supervise, {:atom, :one_for_one}, children} = result
-      assert [{:call, :counter, [0]}] = children
+      # Supervise now includes location
+      assert {:supervise, {:atom, :one_for_one}, children, %Vaisto.Parser.Loc{}} = result
+      assert [{:call, :counter, [0], %Vaisto.Parser.Loc{}}] = children
     end
   end
 
@@ -47,7 +51,8 @@ defmodule Vaisto.ParserTest do
     end
 
     test "handles whitespace" do
-      assert Parser.parse("  (+ 1 2)  ") == {:call, :+, [1, 2]}
+      # Whitespace is skipped, so location starts at column 3
+      assert {:call, :+, [1, 2], %Vaisto.Parser.Loc{line: 1, col: 3}} = Parser.parse("  (+ 1 2)  ")
     end
 
     test "handles newlines" do
@@ -55,7 +60,53 @@ defmodule Vaisto.ParserTest do
       (+ 1
          2)
       """
-      assert Parser.parse(code) == {:call, :+, [1, 2]}
+      assert {:call, :+, [1, 2], %Vaisto.Parser.Loc{line: 1, col: 1}} = Parser.parse(code)
+    end
+  end
+
+  describe "error messages with locations" do
+    test "unclosed parenthesis reports location" do
+      code = "(+ 1 2"
+      error = assert_raise RuntimeError, fn -> Parser.parse(code) end
+      assert error.message =~ "Unclosed parenthesis at line 1, column 1"
+    end
+
+    test "unclosed parenthesis on line 2 reports correct line" do
+      code = """
+      (+ 1 2)
+      (defn foo [x]
+      """
+      error = assert_raise RuntimeError, fn -> Parser.parse(code) end
+      assert error.message =~ "line 2"
+    end
+
+    test "unclosed bracket reports location" do
+      code = "(let [x 1 body)"
+      error = assert_raise RuntimeError, fn -> Parser.parse(code) end
+      assert error.message =~ "Unclosed bracket at line 1, column 6"
+    end
+
+    test "unterminated string reports location" do
+      code = ~s|(print "hello)|
+      error = assert_raise RuntimeError, fn -> Parser.parse(code) end
+      assert error.message =~ "Unterminated string"
+      assert error.message =~ "line 1"
+    end
+
+    test "nested unclosed paren reports outermost unclosed location" do
+      # In "(if true (+ 1 2)", the inner paren IS closed by the final )
+      # It's the outer paren at column 1 that's unclosed
+      code = "(if true (+ 1 2)"
+      error = assert_raise RuntimeError, fn -> Parser.parse(code) end
+      assert error.message =~ "line 1, column 1"
+    end
+
+    test "truly unclosed inner paren reports correct location" do
+      # "(if true (+ 1 2" - both parens unclosed, inner one detected first
+      code = "(if true (+ 1 2"
+      error = assert_raise RuntimeError, fn -> Parser.parse(code) end
+      # Inner paren at column 10 is the first to hit end of input
+      assert error.message =~ "line 1, column 10"
     end
   end
 end

@@ -1,147 +1,208 @@
 defmodule Vaisto.Parser do
   @moduledoc """
-  Minimalist parser for Vaisto S-expressions.
-  
+  Minimalist parser for Vaisto S-expressions with line/column tracking.
+
   Transforms text into AST:
-    "(+ 1 2)" → {:call, :+, [1, 2]}
+    "(+ 1 2)" → {:call, :+, [1, 2], %{line: 1, col: 1}}
+
+  Each AST node includes location metadata for error reporting.
   """
 
+  # Location struct for source positions
+  defmodule Loc do
+    @moduledoc "Source location: line, column, and optional filename"
+    defstruct line: 1, col: 1, file: nil
+
+    def new(line, col, file \\ nil), do: %__MODULE__{line: line, col: col, file: file}
+  end
+
   @doc """
-  Parse a Vaisto source string into an AST.
+  Parse a Vaisto source string into an AST with location metadata.
   """
-  def parse(code) do
+  def parse(code, opts \\ []) do
+    file = Keyword.get(opts, :file)
     code
-    |> tokenize()
+    |> tokenize(file)
     |> do_parse([])
   end
 
-  # Tokenizer: Split by parens/brackets and whitespace, strip comments
-  # Preserves quoted strings as single tokens
-  defp tokenize(code) do
-    code
-    |> strip_comments()
-    |> extract_strings([])
-    |> then(fn {code_with_placeholders, strings} ->
-      tokens = code_with_placeholders
-        |> String.replace("(", " ( ")
-        |> String.replace(")", " ) ")
-        |> String.replace("[", " [ ")
-        |> String.replace("]", " ] ")
-        |> String.split()
-
-      # Restore strings in their placeholder positions
-      restore_strings(tokens, strings)
-    end)
+  # Position-tracking tokenizer
+  # Returns list of {token_string, %Loc{}} tuples
+  defp tokenize(code, file) do
+    tokenize_chars(String.graphemes(code), 1, 1, file, [], nil)
   end
 
-  # Extract quoted strings and replace with placeholders
-  defp extract_strings(code, acc) do
-    case Regex.run(~r/"([^"\\]|\\.)*"/, code, return: :index) do
-      [{start, len} | _] ->
-        string = String.slice(code, start, len)
-        placeholder = "__STRING_#{length(acc)}__"
-        new_code = String.slice(code, 0, start) <> placeholder <> String.slice(code, start + len, String.length(code))
-        extract_strings(new_code, acc ++ [string])
-      nil ->
-        {code, acc}
-    end
+  # Tokenizer state machine
+  # Args: chars, line, col, file, accumulated_tokens, current_token_state
+  # current_token_state: nil | {chars_acc, start_line, start_col} | {:string, chars_acc, start_line, start_col}
+
+  # End of input
+  defp tokenize_chars([], _line, _col, _file, tokens, nil), do: Enum.reverse(tokens)
+  defp tokenize_chars([], _line, _col, file, tokens, {acc, start_line, start_col}) do
+    token = acc |> Enum.reverse() |> Enum.join()
+    Enum.reverse([{token, Loc.new(start_line, start_col, file)} | tokens])
+  end
+  defp tokenize_chars([], _line, _col, _file, _tokens, {:string, _acc, start_line, start_col}) do
+    raise "Unterminated string starting at line #{start_line}, column #{start_col}"
   end
 
-  # Restore strings from placeholders
-  defp restore_strings(tokens, strings) do
-    Enum.map(tokens, fn token ->
-      case Regex.run(~r/^__STRING_(\d+)__$/, token) do
-        [_, idx] -> Enum.at(strings, String.to_integer(idx))
-        nil -> token
-      end
-    end)
+  # Inside a string literal
+  defp tokenize_chars(["\\" | [escaped | rest]], line, col, file, tokens, {:string, acc, sl, sc}) do
+    tokenize_chars(rest, line, col + 2, file, tokens, {:string, [escaped, "\\" | acc], sl, sc})
+  end
+  defp tokenize_chars(["\"" | rest], line, col, file, tokens, {:string, acc, sl, sc}) do
+    # End of string - include the closing quote
+    str_content = acc |> Enum.reverse() |> Enum.join()
+    token = "\"" <> str_content <> "\""
+    tokenize_chars(rest, line, col + 1, file, [{token, Loc.new(sl, sc, file)} | tokens], nil)
+  end
+  defp tokenize_chars(["\n" | rest], line, _col, file, tokens, {:string, acc, sl, sc}) do
+    tokenize_chars(rest, line + 1, 1, file, tokens, {:string, ["\n" | acc], sl, sc})
+  end
+  defp tokenize_chars([c | rest], line, col, file, tokens, {:string, acc, sl, sc}) do
+    tokenize_chars(rest, line, col + 1, file, tokens, {:string, [c | acc], sl, sc})
   end
 
-  # Remove ; comments (everything from ; to end of line)
-  defp strip_comments(code) do
-    code
-    |> String.split("\n")
-    |> Enum.map(fn line ->
-      case String.split(line, ";", parts: 2) do
-        [before, _comment] -> before
-        [line] -> line
-      end
-    end)
-    |> Enum.join("\n")
+  # Start of string
+  defp tokenize_chars(["\"" | rest], line, col, file, tokens, nil) do
+    tokenize_chars(rest, line, col + 1, file, tokens, {:string, [], line, col})
   end
+  defp tokenize_chars(["\"" | rest], line, col, file, tokens, {acc, sl, sc}) do
+    # Flush current token, start string
+    token = acc |> Enum.reverse() |> Enum.join()
+    new_tokens = [{token, Loc.new(sl, sc, file)} | tokens]
+    tokenize_chars(rest, line, col + 1, file, new_tokens, {:string, [], line, col})
+  end
+
+  # Comment: skip to end of line
+  defp tokenize_chars([";" | rest], line, _col, file, tokens, state) do
+    tokens = flush_token(tokens, state, file)
+    {remaining, new_line} = skip_comment(rest, line)
+    tokenize_chars(remaining, new_line, 1, file, tokens, nil)
+  end
+
+  # Newline
+  defp tokenize_chars(["\n" | rest], line, _col, file, tokens, state) do
+    tokens = flush_token(tokens, state, file)
+    tokenize_chars(rest, line + 1, 1, file, tokens, nil)
+  end
+
+  # Whitespace (space, tab, carriage return)
+  defp tokenize_chars([ws | rest], line, col, file, tokens, state) when ws in [" ", "\t", "\r"] do
+    tokens = flush_token(tokens, state, file)
+    tokenize_chars(rest, line, col + 1, file, tokens, nil)
+  end
+
+  # Delimiters: ( ) [ ]
+  defp tokenize_chars([d | rest], line, col, file, tokens, state) when d in ["(", ")", "[", "]"] do
+    tokens = flush_token(tokens, state, file)
+    tokenize_chars(rest, line, col + 1, file, [{d, Loc.new(line, col, file)} | tokens], nil)
+  end
+
+  # Regular character - accumulate into current token
+  defp tokenize_chars([c | rest], line, col, file, tokens, nil) do
+    tokenize_chars(rest, line, col + 1, file, tokens, {[c], line, col})
+  end
+  defp tokenize_chars([c | rest], line, col, file, tokens, {acc, sl, sc}) do
+    tokenize_chars(rest, line, col + 1, file, tokens, {[c | acc], sl, sc})
+  end
+
+  # Flush accumulated token if any
+  defp flush_token(tokens, nil, _file), do: tokens
+  defp flush_token(tokens, {acc, sl, sc}, file) do
+    token = acc |> Enum.reverse() |> Enum.join()
+    [{token, Loc.new(sl, sc, file)} | tokens]
+  end
+
+  # Skip to end of line for comments
+  defp skip_comment([], line), do: {[], line}
+  defp skip_comment(["\n" | rest], line), do: {rest, line + 1}
+  defp skip_comment([_ | rest], line), do: skip_comment(rest, line)
 
   # Recursive descent parser
+  # Tokens are now {token_string, %Loc{}} tuples
   defp do_parse([], [acc]), do: acc
   defp do_parse([], []), do: nil
   defp do_parse([], acc), do: acc
 
-  defp do_parse(["(" | tail], stack) do
-    {rest, list} = parse_list(tail, [])
+  defp do_parse([{"(", loc} | tail], stack) do
+    {rest, list} = parse_list(tail, [], loc)
     do_parse(rest, stack ++ [list])
   end
 
-  defp do_parse([token | tail], stack) do
-    do_parse(tail, stack ++ [parse_token(token)])
+  defp do_parse([{token, loc} | tail], stack) do
+    do_parse(tail, stack ++ [parse_token(token, loc)])
   end
 
   # Handle contents of ( ... )
-  defp parse_list([")" | tail], acc) do
+  # open_loc is the location of the opening paren - attached to the resulting AST node
+  defp parse_list([{")", _} | tail], acc, open_loc) do
     ast = case acc do
-      # Special forms
-      [:if | rest] -> parse_if(rest)
-      [:let | rest] -> parse_let(rest)
-      [:match | rest] -> parse_match(rest)
-      [:receive | rest] -> parse_receive(rest)
-      [:process | rest] -> parse_process(rest)
-      [:supervise | rest] -> parse_supervise(rest)
-      [:def | rest] -> parse_def(rest)
-      [:defn | rest] -> parse_defn(rest)
-      [:deftype | rest] -> parse_deftype(rest)
-      [:fn | rest] -> parse_fn(rest)
-      [:extern | rest] -> parse_extern(rest)
-      # List literal: (list 1 2 3) → {:list, [1, 2, 3]}
-      [:list | elements] -> {:list, elements}
+      # Special forms - location passed to parsers
+      [:if | rest] -> parse_if(rest, open_loc)
+      [:let | rest] -> parse_let(rest, open_loc)
+      [:match | rest] -> parse_match(rest, open_loc)
+      [:receive | rest] -> parse_receive(rest, open_loc)
+      [:process | rest] -> parse_process(rest, open_loc)
+      [:supervise | rest] -> parse_supervise(rest, open_loc)
+      [:def | rest] -> parse_def(rest, open_loc)
+      [:defn | rest] -> parse_defn(rest, open_loc)
+      [:deftype | rest] -> parse_deftype(rest, open_loc)
+      [:fn | rest] -> parse_fn(rest, open_loc)
+      [:extern | rest] -> parse_extern(rest, open_loc)
+      # List literal: (list 1 2 3) → {:list, [1, 2, 3], loc}
+      [:list | elements] -> {:list, elements, open_loc}
       # Regular function call
-      [func | args] -> {:call, func, args}
-      [] -> {:unit}
+      [func | args] -> {:call, func, args, open_loc}
+      [] -> {:unit, open_loc}
     end
     {tail, ast}
   end
 
-  defp parse_list(["(" | tail], acc) do
-    {rest, nested} = parse_list(tail, [])
-    parse_list(rest, acc ++ [nested])
+  defp parse_list([{"(", loc} | tail], acc, open_loc) do
+    {rest, nested} = parse_list(tail, [], loc)
+    parse_list(rest, acc ++ [nested], open_loc)
   end
 
-  defp parse_list(["[" | tail], acc) do
-    {rest, bracket_contents} = parse_bracket(tail, [])
-    parse_list(rest, acc ++ [{:bracket, bracket_contents}])
+  defp parse_list([{"[", loc} | tail], acc, open_loc) do
+    {rest, bracket_contents} = parse_bracket(tail, [], loc)
+    parse_list(rest, acc ++ [{:bracket, bracket_contents}], open_loc)
   end
 
-  defp parse_list([token | tail], acc) do
-    parse_list(tail, acc ++ [parse_token(token)])
+  defp parse_list([{token, loc} | tail], acc, open_loc) do
+    parse_list(tail, acc ++ [parse_token(token, loc)], open_loc)
+  end
+
+  # Handle unclosed paren - provide helpful error with location
+  defp parse_list([], _acc, open_loc) do
+    raise "Unclosed parenthesis at line #{open_loc.line}, column #{open_loc.col}"
   end
 
   # Parse bracket contents [...] - used for let bindings and patterns
   # After accumulating, check for cons pattern: [h | t] → {:cons, h, t}
-  defp parse_bracket(["]" | tail], acc) do
+  defp parse_bracket([{"]", _} | tail], acc, _open_loc) do
     result = normalize_bracket_pattern(acc)
     {tail, result}
   end
 
-  defp parse_bracket(["(" | tail], acc) do
-    {rest, nested} = parse_list(tail, [])
-    parse_bracket(rest, acc ++ [nested])
+  defp parse_bracket([{"(", loc} | tail], acc, open_loc) do
+    {rest, nested} = parse_list(tail, [], loc)
+    parse_bracket(rest, acc ++ [nested], open_loc)
   end
 
-  defp parse_bracket(["[" | tail], acc) do
+  defp parse_bracket([{"[", loc} | tail], acc, open_loc) do
     # Nested bracket (e.g., [[]] for empty list pattern)
-    {rest, nested} = parse_bracket(tail, [])
-    parse_bracket(rest, acc ++ [nested])
+    {rest, nested} = parse_bracket(tail, [], loc)
+    parse_bracket(rest, acc ++ [nested], open_loc)
   end
 
-  defp parse_bracket([token | tail], acc) do
-    parse_bracket(tail, acc ++ [parse_token(token)])
+  defp parse_bracket([{token, loc} | tail], acc, open_loc) do
+    parse_bracket(tail, acc ++ [parse_token(token, loc)], open_loc)
+  end
+
+  # Handle unclosed bracket - provide helpful error with location
+  defp parse_bracket([], _acc, open_loc) do
+    raise "Unclosed bracket at line #{open_loc.line}, column #{open_loc.col}"
   end
 
   # Normalize bracket contents: detect cons pattern [h | t] → {:cons, h, t}
@@ -157,64 +218,66 @@ defmodule Vaisto.Parser do
   end
 
   # Special form parsers
+  # All take location as last argument and include it in the AST node
 
-  # (if cond then else) → {:if, cond, then, else}
-  defp parse_if([condition, then_branch, else_branch]) do
-    {:if, condition, then_branch, else_branch}
+  # (if cond then else) → {:if, cond, then, else, loc}
+  defp parse_if([condition, then_branch, else_branch], loc) do
+    {:if, condition, then_branch, else_branch, loc}
   end
 
-  # (let [x 1 y 2] body) → {:let, [{:x, 1}, {:y, 2}], body}
-  defp parse_let([{:bracket, bindings}, body]) do
+  # (let [x 1 y 2] body) → {:let, [{:x, 1}, {:y, 2}], body, loc}
+  defp parse_let([{:bracket, bindings}, body], loc) do
     pairs = bindings
       |> Enum.chunk_every(2)
       |> Enum.map(fn [name, value] -> {name, value} end)
-    {:let, pairs, body}
+    {:let, pairs, body, loc}
   end
 
-  # (match expr [pattern1 body1] [pattern2 body2] ...) → {:match, expr, [{pattern, body}, ...]}
-  defp parse_match([expr | clauses]) do
+  # (match expr [pattern1 body1] [pattern2 body2] ...) → {:match, expr, [{pattern, body}, ...], loc}
+  defp parse_match([expr | clauses], loc) do
     parsed_clauses = Enum.map(clauses, fn {:bracket, [pattern, body]} ->
       {pattern, body}
     end)
-    {:match, expr, parsed_clauses}
+    {:match, expr, parsed_clauses, loc}
   end
 
-  # (receive [pattern1 body1] [pattern2 body2] ...) → {:receive, [{pattern, body}, ...]}
+  # (receive [pattern1 body1] [pattern2 body2] ...) → {:receive, [{pattern, body}, ...], loc}
   # Blocks until a message matching one of the patterns arrives
-  defp parse_receive(clauses) do
+  defp parse_receive(clauses, loc) do
     parsed_clauses = Enum.map(clauses, fn {:bracket, [pattern, body]} ->
       {pattern, body}
     end)
-    {:receive, parsed_clauses}
+    {:receive, parsed_clauses, loc}
   end
 
-  defp parse_process([name, initial_state | handlers]) do
-    {:process, name, initial_state, parse_handlers(handlers)}
+  defp parse_process([name, initial_state | handlers], loc) do
+    {:process, name, initial_state, parse_handlers(handlers), loc}
   end
 
-  defp parse_supervise([strategy | children]) do
-    {:supervise, strategy, children}
+  defp parse_supervise([strategy | children], loc) do
+    {:supervise, strategy, children, loc}
   end
 
-  defp parse_def([name, args, body]) do
-    {:def, name, args, body}
+  defp parse_def([name, args, body], loc) do
+    {:def, name, args, body, loc}
   end
 
-  # (defn add [x y] (+ x y)) → {:defn, :add, [{:x, :any}, {:y, :any}], body}
-  # (defn add [x :int y :int] (+ x y)) → {:defn, :add, [{:x, :int}, {:y, :int}], body}
+  # (defn add [x y] (+ x y)) → {:defn, :add, [{:x, :any}, {:y, :any}], body, loc}
+  # (defn add [x :int y :int] (+ x y)) → {:defn, :add, [{:x, :int}, {:y, :int}], body, loc}
   # Single-clause: name, params bracket, non-bracket body
-  defp parse_defn([name, {:bracket, params}, body]) when not is_tuple(body) or elem(body, 0) != :bracket do
+  defp parse_defn([name, {:bracket, params}, body], loc) when not is_tuple(body) or elem(body, 0) != :bracket do
     # Check if params look like typed (name :type pairs) or untyped (just names)
     typed_params = if looks_typed?(params) do
       # Parse as pairs: [x :int y :int] → [{:x, :int}, {:y, :int}]
+      # Unwrap {:atom, type} to just type
       params
       |> Enum.chunk_every(2)
-      |> Enum.map(fn [param_name, type] -> {param_name, type} end)
+      |> Enum.map(fn [param_name, type] -> {param_name, unwrap_type(type)} end)
     else
       # Untyped params: [x y] → [{:x, :any}, {:y, :any}]
       Enum.map(params, fn p -> {p, :any} end)
     end
-    {:defn, name, typed_params, body}
+    {:defn, name, typed_params, body, loc}
   end
 
   # Multi-clause function definition
@@ -222,7 +285,7 @@ defmodule Vaisto.Parser do
   #   [[] 0]
   #   [[h | t] (+ 1 (len t))])
   # All clauses are brackets: [pattern body]
-  defp parse_defn([name | clauses]) when is_list(clauses) and length(clauses) > 0 do
+  defp parse_defn([name | clauses], loc) when is_list(clauses) and length(clauses) > 0 do
     # Check if this is multi-clause style (all elements are brackets)
     all_brackets? = Enum.all?(clauses, fn
       {:bracket, _} -> true
@@ -234,10 +297,10 @@ defmodule Vaisto.Parser do
       parsed_clauses = Enum.map(clauses, fn {:bracket, clause_content} ->
         extract_pattern_body(clause_content)
       end)
-      {:defn_multi, name, parsed_clauses}
+      {:defn_multi, name, parsed_clauses, loc}
     else
       # Single clause with bracket body (unlikely but handle gracefully)
-      {:error, "Invalid defn syntax"}
+      {:error, "Invalid defn syntax", loc}
     end
   end
 
@@ -246,40 +309,49 @@ defmodule Vaisto.Parser do
   # [] → empty list, {:cons, h, t} → cons pattern, etc.
   defp extract_pattern_body([pattern, body]), do: {pattern, body}
 
-  # Check if params list looks like typed pairs (alternating atoms and types)
+  # Check if params list looks like typed pairs (alternating names and types)
+  # Types come from tokenizer as {:atom, :int} wrapped form
   defp looks_typed?(params) when length(params) >= 2 do
-    # If second element is a type atom (starts with : in original syntax), it's typed
+    # If second element is a type (either wrapped {:atom, :type} or raw :type), it's typed
     params
     |> Enum.drop(1)
     |> Enum.take_every(2)
-    |> Enum.all?(fn p -> is_atom(p) and p in [:int, :float, :string, :bool, :any, :atom] end)
+    |> Enum.all?(&is_type_annotation?/1)
   end
   defp looks_typed?(_), do: false
 
-  # (fn [x] (* x 2)) → {:fn, [:x], body}
-  defp parse_fn([{:bracket, params}, body]) do
-    {:fn, params, body}
+  defp is_type_annotation?({:atom, t}) when t in [:int, :float, :string, :bool, :any, :atom], do: true
+  defp is_type_annotation?(t) when is_atom(t) and t in [:int, :float, :string, :bool, :any, :atom], do: true
+  defp is_type_annotation?(_), do: false
+
+  # Unwrap {:atom, :int} → :int for type annotations
+  defp unwrap_type({:atom, t}), do: t
+  defp unwrap_type(t), do: t
+
+  # (fn [x] (* x 2)) → {:fn, [:x], body, loc}
+  defp parse_fn([{:bracket, params}, body], loc) do
+    {:fn, params, body, loc}
   end
 
-  # (deftype point [x :int y :int]) → {:deftype, :point, [{:x, :int}, {:y, :int}]}
-  defp parse_deftype([name, {:bracket, fields}]) do
+  # (deftype point [x :int y :int]) → {:deftype, :point, [{:x, :int}, {:y, :int}], loc}
+  defp parse_deftype([name, {:bracket, fields}], loc) do
     # Parse field pairs: [x :int y :int] → [{:x, :int}, {:y, :int}]
     field_pairs = fields
       |> Enum.chunk_every(2)
       |> Enum.map(fn [field_name, type] -> {field_name, type} end)
-    {:deftype, name, field_pairs}
+    {:deftype, name, field_pairs, loc}
   end
 
   # Legacy support: (deftype point x y) → untyped fields
-  defp parse_deftype([name | fields]) when is_list(fields) and length(fields) > 0 do
+  defp parse_deftype([name | fields], loc) when is_list(fields) and length(fields) > 0 do
     # Old-style untyped fields - convert to {:field_name, :any}
     field_pairs = Enum.map(fields, fn field -> {field, :any} end)
-    {:deftype, name, field_pairs}
+    {:deftype, name, field_pairs, loc}
   end
 
-  # (extern erlang:hd [(List :any)] :any) → {:extern, :erlang, :hd, [type_expr], ret_type}
-  defp parse_extern([{:qualified, mod, func}, {:bracket, arg_types}, ret_type]) do
-    {:extern, mod, func, arg_types, ret_type}
+  # (extern erlang:hd [(List :any)] :any) → {:extern, :erlang, :hd, [type_expr], ret_type, loc}
+  defp parse_extern([{:qualified, mod, func}, {:bracket, arg_types}, ret_type], loc) do
+    {:extern, mod, func, arg_types, ret_type, loc}
   end
 
   defp parse_handlers(handlers) do
@@ -289,7 +361,9 @@ defmodule Vaisto.Parser do
   end
 
   # Token conversion
-  defp parse_token(token) do
+  # Takes token string and location, returns parsed value
+  # Location is available for future use in error messages
+  defp parse_token(token, _loc) do
     cond do
       # String literal: "hello" → {:string, "hello"}
       String.starts_with?(token, "\"") ->

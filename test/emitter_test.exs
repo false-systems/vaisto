@@ -66,9 +66,9 @@ defmodule Vaisto.EmitterTest do
     test "simple arithmetic" do
       code = "(+ 1 2)"
 
-      # Parse
+      # Parse - now includes location
       ast = Vaisto.Parser.parse(code)
-      assert {:call, :+, [1, 2]} = ast
+      assert {:call, :+, [1, 2], %Vaisto.Parser.Loc{}} = ast
 
       # Type check
       {:ok, _type, typed_ast} = Vaisto.TypeChecker.check(ast)
@@ -734,7 +734,8 @@ defmodule Vaisto.EmitterTest do
       code = "(receive [:ping 1] [:pong 2])"
 
       ast = Vaisto.Parser.parse(code)
-      assert {:receive, [ping_clause, pong_clause]} = ast
+      # AST now includes location
+      assert {:receive, [ping_clause, pong_clause], %Vaisto.Parser.Loc{}} = ast
       # Parser now wraps atoms in {:atom, value} to distinguish from variables
       assert {{:atom, :ping}, 1} = ping_clause
       assert {{:atom, :pong}, 2} = pong_clause

@@ -106,14 +106,14 @@ defmodule Vaisto.TypeCheckerTest do
     test "parser creates typed field tuples from bracket syntax" do
       code = "(deftype point [x :int y :int])"
       ast = Vaisto.Parser.parse(code)
-      # Atoms are now wrapped by parser
-      assert {:deftype, :point, [{:x, {:atom, :int}}, {:y, {:atom, :int}}]} = ast
+      # Atoms are now wrapped by parser, AST now includes location
+      assert {:deftype, :point, [{:x, {:atom, :int}}, {:y, {:atom, :int}}], %Vaisto.Parser.Loc{}} = ast
     end
 
     test "parser converts legacy untyped syntax to :any fields" do
       code = "(deftype point x y)"
       ast = Vaisto.Parser.parse(code)
-      assert {:deftype, :point, [{:x, :any}, {:y, :any}]} = ast
+      assert {:deftype, :point, [{:x, :any}, {:y, :any}], %Vaisto.Parser.Loc{}} = ast
     end
 
     test "typed record constructor has correct field types" do
@@ -154,6 +154,118 @@ defmodule Vaisto.TypeCheckerTest do
       {:ok, :module, {:module, [_deftype, call_expr]}} = TypeChecker.check(ast)
       {:call, :point, _args, result_type} = call_expr
       assert {:record, :point, [{:x, :int}, {:y, :int}]} = result_type
+    end
+  end
+
+  describe "error messages with location" do
+    test "type mismatch includes line and column" do
+      code = "(+ 1 :atom)"
+      ast = Vaisto.Parser.parse(code)
+      {:error, msg} = TypeChecker.check(ast)
+      # Error should include location prefix
+      assert msg =~ ~r/^\d+:\d+:/
+      assert msg =~ "Type mismatch"
+    end
+
+    test "type mismatch includes filename when provided" do
+      code = "(+ 1 :atom)"
+      ast = Vaisto.Parser.parse(code, file: "test.va")
+      {:error, msg} = TypeChecker.check(ast)
+      assert msg =~ "test.va:1:1:"
+    end
+
+    test "nested error shows innermost location" do
+      code = """
+      (+ 1
+         (+ 2 :bad))
+      """
+      ast = Vaisto.Parser.parse(code, file: "nested.va")
+      {:error, msg} = TypeChecker.check(ast)
+      # Should show innermost call location (line 2)
+      assert msg =~ "nested.va:2:"
+    end
+
+    test "unknown function includes location" do
+      code = "(unknown-func 1 2)"
+      ast = Vaisto.Parser.parse(code)
+      {:error, msg} = TypeChecker.check(ast)
+      assert msg =~ "1:1:"
+      assert msg =~ "Unknown function"
+    end
+  end
+
+  describe "check_with_source/3 - Rust-style errors" do
+    test "formats type mismatch with source snippet" do
+      code = "(+ 1 :atom)"
+      ast = Vaisto.Parser.parse(code, file: "test.va")
+
+      {:error, formatted} = TypeChecker.check_with_source(ast, code)
+
+      # Should have Rust-style formatting
+      assert formatted =~ "error"
+      assert formatted =~ "test.va:1:1"
+      assert formatted =~ "(+ 1 :atom)"
+      assert formatted =~ "^"  # Pointer
+    end
+
+    test "formats error on correct line in multiline code" do
+      code = """
+      (+ 1 2)
+      (+ 3 :bad)
+      """
+      ast = Vaisto.Parser.parse(code, file: "multi.va")
+
+      {:error, formatted} = TypeChecker.check_with_source(ast, code)
+
+      assert formatted =~ "multi.va:2:"
+      assert formatted =~ "(+ 3 :bad)"
+    end
+
+    test "passes through success results unchanged" do
+      code = "(+ 1 2)"
+      ast = Vaisto.Parser.parse(code)
+
+      result = TypeChecker.check_with_source(ast, code)
+
+      assert {:ok, :int, _} = result
+    end
+  end
+
+  describe "Hindley-Milner inference" do
+    test "infers identity function type" do
+      # (fn [x] x) should infer a polymorphic type
+      ast = {:fn, [:x], :x}
+      {:ok, type, _} = TypeChecker.infer(ast)
+
+      # Should be {:fn, [tvar], tvar} where both are the same
+      assert {:fn, [param_type], ret_type} = type
+      assert param_type == ret_type
+    end
+
+    test "infers int -> int for arithmetic function" do
+      # (fn [x] (+ x 1)) should infer int -> int
+      ast = {:fn, [:x], {:call, :+, [:x, 1]}}
+      {:ok, type, _} = TypeChecker.infer(ast)
+
+      assert type == {:fn, [:int], :int}
+    end
+
+    test "check uses inference for anonymous functions" do
+      # When check encounters an anonymous function, it should use inference
+      ast = {:fn, [:x], {:call, :+, [:x, 1]}}
+      {:ok, type, _} = TypeChecker.check(ast)
+
+      # Should get int -> int, not any -> int
+      assert {:fn, [:int], :int} = type
+    end
+
+    test "let-polymorphism works" do
+      # (let [id (fn [x] x)] (+ (id 1) 2))
+      ast = {:let, [{:id, {:fn, [:x], :x}}],
+             {:call, :+, [{:call, :id, [1]}, 2]}}
+      {:ok, type, _} = TypeChecker.infer(ast)
+
+      assert type == :int
     end
   end
 end
