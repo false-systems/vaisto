@@ -1,11 +1,14 @@
 defmodule Vaisto.TypeChecker do
   @moduledoc """
   Type checker for Vaisto using Hindley-Milner style inference.
-  
+
   Ensures type safety at compile time:
     (+ 1 :atom) → TypeError
     (+ 1 2)     → :int
   """
+
+  alias Vaisto.Error
+  alias Vaisto.Errors
 
   # Built-in type environment
   # Note: spawn and send (!) are handled specially for typed PIDs
@@ -44,22 +47,23 @@ defmodule Vaisto.TypeChecker do
 
   The error string will be in Rust-style diagnostic format:
 
-      error: type mismatch: expected Int, found Atom
+      error[E001]: type mismatch
         --> test.va:1:6
         |
       1 | (+ 1 :atom)
-        |      ^^^^^
+        |      ^^^^^ expected `Int`, found `Atom`
   """
   def check_with_source(ast, source, env \\ @primitives) do
     case check(ast, env) do
       {:ok, _, _} = success -> success
-      {:error, msg} ->
+      {:error, %Error{} = error} ->
+        # Structured error - format with rich display
+        {:error, Vaisto.ErrorFormatter.format(error, source)}
+      {:error, msg} when is_binary(msg) ->
+        # Legacy string error - try to parse and format
         case Vaisto.ErrorFormatter.parse_legacy_error(msg) do
-          nil ->
-            # Can't parse, return as-is
-            {:error, msg}
-          error_map ->
-            {:error, Vaisto.ErrorFormatter.format(error_map, source)}
+          nil -> {:error, msg}
+          error_map -> {:error, Vaisto.ErrorFormatter.format(error_map, source)}
         end
     end
   end
@@ -137,7 +141,7 @@ defmodule Vaisto.TypeChecker do
             list_type = {:list, elem_type}
             {:ok, list_type, {:list, typed_elements, list_type}}
           mismatched ->
-            {:error, "List elements must have the same type: expected #{inspect(elem_type)}, got #{inspect(mismatched)}"}
+            {:error, Errors.list_type_mismatch(elem_type, mismatched)}
         end
       error -> error
     end
@@ -161,7 +165,7 @@ defmodule Vaisto.TypeChecker do
   # Variable lookup
   def check({:var, name}, env) do
     case Map.get(env, name) do
-      nil -> {:error, "Undefined variable: #{name}"}
+      nil -> {:error, Errors.undefined_variable(name)}
       type -> {:ok, type, {:var, name, type}}
     end
   end
@@ -189,7 +193,7 @@ defmodule Vaisto.TypeChecker do
         :any ->
           {:ok, :any, {:call, :head, [typed_list], :any}}
         other ->
-          {:error, "head expects a list, got #{inspect(other)}"}
+          {:error, Errors.not_a_list(:head, other)}
       end
     end
   end
@@ -203,7 +207,7 @@ defmodule Vaisto.TypeChecker do
         :any ->
           {:ok, {:list, :any}, {:call, :tail, [typed_list], {:list, :any}}}
         other ->
-          {:error, "tail expects a list, got #{inspect(other)}"}
+          {:error, Errors.not_a_list(:tail, other)}
       end
     end
   end
@@ -222,13 +226,13 @@ defmodule Vaisto.TypeChecker do
             result_type = {:list, list_elem_type}
             {:ok, result_type, {:call, :cons, [typed_elem, typed_list], result_type}}
           else
-            {:error, "cons type mismatch: element is #{inspect(elem_type)}, list is #{inspect(list_type)}"}
+            {:error, Errors.cons_type_mismatch(elem_type, list_type)}
           end
         :any ->
           result_type = {:list, elem_type}
           {:ok, result_type, {:call, :cons, [typed_elem, typed_list], result_type}}
         other ->
-          {:error, "cons expects a list as second argument, got #{inspect(other)}"}
+          {:error, Errors.not_a_list(:cons, other)}
       end
     end
   end
@@ -242,7 +246,7 @@ defmodule Vaisto.TypeChecker do
         :any ->
           {:ok, :bool, {:call, :empty?, [typed_list], :bool}}
         other ->
-          {:error, "empty? expects a list, got #{inspect(other)}"}
+          {:error, Errors.not_a_list(:empty?, other)}
       end
     end
   end
@@ -256,7 +260,7 @@ defmodule Vaisto.TypeChecker do
         :any ->
           {:ok, :int, {:call, :length, [typed_list], :int}}
         other ->
-          {:error, "length expects a list, got #{inspect(other)}"}
+          {:error, Errors.not_a_list(:length, other)}
       end
     end
   end
@@ -286,13 +290,13 @@ defmodule Vaisto.TypeChecker do
           result_type = {:list, ret_type}
           {:ok, result_type, {:call, :map, [func_name, typed_list], result_type}}
         {{:fn, args, _}, _} when length(args) != 1 ->
-          {:error, "map function must take exactly 1 argument, got #{length(args)}"}
+          {:error, Errors.mapper_arity(:map, 1, length(args))}
         {_, {:list, _}} ->
-          {:error, "map expects a function and a list"}
+          {:error, Errors.not_a_function(:map, func_type)}
         {_, :any} ->
-          {:error, "map expects a function and a list"}
+          {:error, Errors.not_a_function(:map, func_type)}
         {_, other} ->
-          {:error, "map expects a list as second argument, got #{inspect(other)}"}
+          {:error, Errors.not_a_list(:map, other)}
       end
     end
   end
@@ -322,9 +326,9 @@ defmodule Vaisto.TypeChecker do
           result_type = {:list, ret_type}
           {:ok, result_type, {:call, :map, [typed_fn, typed_list], result_type}}
         {{:fn, args, _}, _} when length(args) != 1 ->
-          {:error, "map function must take exactly 1 argument, got #{length(args)}"}
+          {:error, Errors.mapper_arity(:map, 1, length(args))}
         {_, other} ->
-          {:error, "map expects a list as second argument, got #{inspect(other)}"}
+          {:error, Errors.not_a_list(:map, other)}
       end
     end
   end
@@ -350,15 +354,15 @@ defmodule Vaisto.TypeChecker do
         {{:fn, [_], :bool}, :any} ->
           {:ok, {:list, :any}, {:call, :filter, [func_name, typed_list], {:list, :any}}}
         {{:fn, [_], ret_type}, _} when ret_type not in [:bool, :any] ->
-          {:error, "filter predicate must return bool, got #{inspect(ret_type)}"}
+          {:error, Errors.predicate_not_bool(ret_type)}
         {{:fn, args, _}, _} when length(args) != 1 ->
-          {:error, "filter predicate must take exactly 1 argument, got #{length(args)}"}
+          {:error, Errors.mapper_arity(:filter, 1, length(args))}
         {_, {:list, _}} ->
-          {:error, "filter expects a predicate function and a list"}
+          {:error, Errors.not_a_function(:filter, func_type)}
         {_, :any} ->
-          {:error, "filter expects a predicate function and a list"}
+          {:error, Errors.not_a_function(:filter, func_type)}
         {_, other} ->
-          {:error, "filter expects a list as second argument, got #{inspect(other)}"}
+          {:error, Errors.not_a_list(:filter, other)}
       end
     end
   end
@@ -388,11 +392,11 @@ defmodule Vaisto.TypeChecker do
         {{:fn, [_], :bool}, :any} ->
           {:ok, {:list, :any}, {:call, :filter, [typed_fn, typed_list], {:list, :any}}}
         {{:fn, [_], ret_type}, _} when ret_type not in [:bool, :any] ->
-          {:error, "filter predicate must return bool, got #{inspect(ret_type)}"}
+          {:error, Errors.predicate_not_bool(ret_type)}
         {{:fn, args, _}, _} when length(args) != 1 ->
-          {:error, "filter predicate must take exactly 1 argument, got #{length(args)}"}
+          {:error, Errors.mapper_arity(:filter, 1, length(args))}
         {_, other} ->
-          {:error, "filter expects a list as second argument, got #{inspect(other)}"}
+          {:error, Errors.not_a_list(:filter, other)}
       end
     end
   end
@@ -417,13 +421,13 @@ defmodule Vaisto.TypeChecker do
         {{:fn, [_, _], ret_type}, :any} ->
           {:ok, ret_type, {:call, :fold, [func_name, typed_init, typed_list], ret_type}}
         {{:fn, args, _}, _} when length(args) != 2 ->
-          {:error, "fold function must take exactly 2 arguments (acc, elem), got #{length(args)}"}
+          {:error, Errors.mapper_arity(:fold, 2, length(args))}
         {_, {:list, _}} ->
           {:ok, init_type, {:call, :fold, [func_name, typed_init, typed_list], init_type}}
         {_, :any} ->
           {:ok, init_type, {:call, :fold, [func_name, typed_init, typed_list], init_type}}
         {_, other} ->
-          {:error, "fold expects a list as third argument, got #{inspect(other)}"}
+          {:error, Errors.not_a_list(:fold, other)}
       end
     end
   end
@@ -452,13 +456,13 @@ defmodule Vaisto.TypeChecker do
         {{:fn, [_, _], ret_type}, :any} ->
           {:ok, ret_type, {:call, :fold, [typed_fn, typed_init, typed_list], ret_type}}
         {{:fn, args, _}, _} when length(args) != 2 ->
-          {:error, "fold function must take exactly 2 arguments (acc, elem), got #{length(args)}"}
+          {:error, Errors.mapper_arity(:fold, 2, length(args))}
         {_, {:list, _}} ->
           {:ok, init_type, {:call, :fold, [typed_fn, typed_init, typed_list], init_type}}
         {_, :any} ->
           {:ok, init_type, {:call, :fold, [typed_fn, typed_init, typed_list], init_type}}
         {_, other} ->
-          {:error, "fold expects a list as third argument, got #{inspect(other)}"}
+          {:error, Errors.not_a_list(:fold, other)}
       end
     end
   end
@@ -479,8 +483,7 @@ defmodule Vaisto.TypeChecker do
           if msg_atom in accepted_msgs do
             {:ok, :ok, {:call, :"!", [typed_pid, typed_msg], :ok}}
           else
-            {:error, "Process #{process_name} does not accept message :#{msg_atom}. " <>
-                     "Valid messages: #{inspect(accepted_msgs)}"}
+            {:error, Errors.invalid_message(process_name, msg_atom, accepted_msgs)}
           end
 
         :pid ->
@@ -488,7 +491,7 @@ defmodule Vaisto.TypeChecker do
           {:ok, :ok, {:call, :"!", [typed_pid, typed_msg], :ok}}
 
         other ->
-          {:error, "Expected a PID, got #{inspect(other)}"}
+          {:error, Errors.send_to_non_pid(other)}
       end
     end
   end
@@ -644,7 +647,7 @@ defmodule Vaisto.TypeChecker do
       {:ok, inferred_ret_type, typed_body} ->
         # If return type was declared, verify it matches
         if declared_ret_type != :any and not types_match?(declared_ret_type, inferred_ret_type) do
-          {:error, "Return type mismatch: declared #{inspect(declared_ret_type)}, but body has type #{inspect(inferred_ret_type)}"}
+          {:error, Errors.return_type_mismatch(declared_ret_type, inferred_ret_type)}
         else
           final_ret_type = if declared_ret_type != :any, do: declared_ret_type, else: inferred_ret_type
           func_type = {:fn, param_types, final_ret_type}
@@ -781,10 +784,21 @@ defmodule Vaisto.TypeChecker do
   defp strip_fn_loc(other), do: other
 
   # Add location to error messages
-  # Pass through success results, enhance error messages with line/column
-  # Only add location if the error message doesn't already have one (starts with digit:)
+  # Pass through success results, enhance errors with line/column
   defp with_loc({:ok, _, _} = result, _loc), do: result
-  defp with_loc({:error, msg}, %Vaisto.Parser.Loc{line: line, col: col, file: file}) do
+
+  # Structured error - add location info if not already present
+  defp with_loc({:error, %Error{primary_span: nil} = error}, %Vaisto.Parser.Loc{} = loc) do
+    span = Error.span_from_loc(loc)
+    {:error, %{error | file: loc.file, primary_span: span}}
+  end
+  defp with_loc({:error, %Error{} = error}, %Vaisto.Parser.Loc{} = loc) do
+    # Error already has span, just add file if missing
+    {:error, %{error | file: error.file || loc.file}}
+  end
+
+  # Legacy string error - add location prefix
+  defp with_loc({:error, msg}, %Vaisto.Parser.Loc{line: line, col: col, file: file}) when is_binary(msg) do
     # Check if error already has location (format: "line:col:" or "file:line:col:")
     if String.match?(msg, ~r/^\d+:\d+:/) or String.match?(msg, ~r/^[^:]+:\d+:\d+:/) do
       # Error already has location, pass through
@@ -802,7 +816,7 @@ defmodule Vaisto.TypeChecker do
 
   defp lookup_function(name, env) do
     case Map.get(env, name) do
-      nil -> {:error, "Unknown function: #{name}"}
+      nil -> {:error, Errors.unknown_function(name)}
       type -> {:ok, type}
     end
   end
@@ -810,8 +824,9 @@ defmodule Vaisto.TypeChecker do
   defp lookup_process(name, env) when is_atom(name) do
     case Map.get(env, name) do
       {:process, _, _} = process_type -> {:ok, process_type}
-      nil -> {:error, "Unknown process: #{name}"}
-      other -> {:error, "#{name} is not a process, got: #{inspect(other)}"}
+      nil -> {:error, Errors.unknown_process(name)}
+      other -> {:error, Errors.type_mismatch(:process, other,
+                  note: "`#{name}` is not a process")}
     end
   end
 
@@ -1224,7 +1239,7 @@ defmodule Vaisto.TypeChecker do
 
   defp unify_call({:fn, expected_args, ret_type}, actual_args) do
     if length(expected_args) != length(actual_args) do
-      {:error, "Arity mismatch: expected #{length(expected_args)}, got #{length(actual_args)}"}
+      {:error, Errors.arity_mismatch(:function, length(expected_args), length(actual_args))}
     else
       mismatches =
         Enum.zip(expected_args, actual_args)
@@ -1233,8 +1248,9 @@ defmodule Vaisto.TypeChecker do
 
       case mismatches do
         [] -> {:ok, ret_type}
-        [{_, idx} | _] ->
-          {:error, "Type mismatch at argument #{idx + 1}"}
+        [{{expected, actual}, idx} | _] ->
+          {:error, Errors.type_mismatch(expected, actual,
+            note: "at argument #{idx + 1}")}
       end
     end
   end
@@ -1252,12 +1268,12 @@ defmodule Vaisto.TypeChecker do
 
   defp expect_bool(:bool), do: :ok
   defp expect_bool(:any), do: :ok
-  defp expect_bool(other), do: {:error, "Expected bool in condition, got #{inspect(other)}"}
+  defp expect_bool(other), do: {:error, Errors.type_mismatch(:bool, other, hint: "conditions must be boolean")}
 
   defp expect_same_type(t, t), do: :ok
   defp expect_same_type(:any, _), do: :ok
   defp expect_same_type(_, :any), do: :ok
-  defp expect_same_type(t1, t2), do: {:error, "Branch types must match: #{inspect(t1)} vs #{inspect(t2)}"}
+  defp expect_same_type(t1, t2), do: {:error, Errors.branch_type_mismatch(t1, t2)}
 
   defp check_handlers(handlers, state_type, env) do
     handler_env = Map.put(env, :state, state_type)

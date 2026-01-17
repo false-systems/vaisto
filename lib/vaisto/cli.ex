@@ -164,7 +164,7 @@ defmodule Vaisto.CLI do
     full_source = @prelude <> "\n\n" <> source
 
     with {:ok, ast} <- parse(full_source),
-         {:ok, _type, typed_ast} <- TypeChecker.check(ast) do
+         {:ok, _type, typed_ast} <- TypeChecker.check_with_source(ast, full_source) do
       case backend do
         :core -> CoreEmitter.compile(typed_ast, module_name)
         :elixir -> Emitter.compile(typed_ast, module_name)
@@ -181,8 +181,15 @@ defmodule Vaisto.CLI do
     end
   end
 
-  defp format_error(file, reason) when is_binary(reason) do
-    "#{file}: #{reason}"
+  defp format_error(_file, reason) when is_binary(reason) do
+    # Already formatted (from check_with_source)
+    reason
+  end
+
+  defp format_error(file, %Vaisto.Error{} = error) do
+    # Structured error - format it
+    # This shouldn't normally happen since check_with_source formats them
+    "#{file}: [#{error.code}] #{error.message}"
   end
 
   defp format_error(file, reason) do

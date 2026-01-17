@@ -8,12 +8,23 @@ defmodule Vaisto.Parser do
   Each AST node includes location metadata for error reporting.
   """
 
-  # Location struct for source positions
+  # Location struct for source positions with span information
   defmodule Loc do
-    @moduledoc "Source location: line, column, and optional filename"
-    defstruct line: 1, col: 1, file: nil
+    @moduledoc """
+    Source location with span information for error reporting.
 
-    def new(line, col, file \\ nil), do: %__MODULE__{line: line, col: col, file: file}
+    Fields:
+    - line, col: Start position (1-indexed)
+    - length: Span length in characters (for error underlining)
+    - file: Optional filename
+    """
+    defstruct line: 1, col: 1, length: 1, file: nil
+
+    def new(line, col, file \\ nil), do: %__MODULE__{line: line, col: col, length: 1, file: file}
+
+    def new(line, col, length, file) do
+      %__MODULE__{line: line, col: col, length: length, file: file}
+    end
   end
 
   @doc """
@@ -40,7 +51,8 @@ defmodule Vaisto.Parser do
   defp tokenize_chars([], _line, _col, _file, tokens, nil), do: Enum.reverse(tokens)
   defp tokenize_chars([], _line, _col, file, tokens, {acc, start_line, start_col}) do
     token = acc |> Enum.reverse() |> Enum.join()
-    Enum.reverse([{token, Loc.new(start_line, start_col, file)} | tokens])
+    length = String.length(token)
+    Enum.reverse([{token, Loc.new(start_line, start_col, length, file)} | tokens])
   end
   defp tokenize_chars([], _line, _col, _file, _tokens, {:string, _acc, start_line, start_col}) do
     raise "Unterminated string starting at line #{start_line}, column #{start_col}"
@@ -54,7 +66,8 @@ defmodule Vaisto.Parser do
     # End of string - include the closing quote
     str_content = acc |> Enum.reverse() |> Enum.join()
     token = "\"" <> str_content <> "\""
-    tokenize_chars(rest, line, col + 1, file, [{token, Loc.new(sl, sc, file)} | tokens], nil)
+    length = String.length(token)
+    tokenize_chars(rest, line, col + 1, file, [{token, Loc.new(sl, sc, length, file)} | tokens], nil)
   end
   defp tokenize_chars(["\n" | rest], line, _col, file, tokens, {:string, acc, sl, sc}) do
     tokenize_chars(rest, line + 1, 1, file, tokens, {:string, ["\n" | acc], sl, sc})
@@ -70,7 +83,8 @@ defmodule Vaisto.Parser do
   defp tokenize_chars(["\"" | rest], line, col, file, tokens, {acc, sl, sc}) do
     # Flush current token, start string
     token = acc |> Enum.reverse() |> Enum.join()
-    new_tokens = [{token, Loc.new(sl, sc, file)} | tokens]
+    length = String.length(token)
+    new_tokens = [{token, Loc.new(sl, sc, length, file)} | tokens]
     tokenize_chars(rest, line, col + 1, file, new_tokens, {:string, [], line, col})
   end
 
@@ -111,7 +125,8 @@ defmodule Vaisto.Parser do
   defp flush_token(tokens, nil, _file), do: tokens
   defp flush_token(tokens, {acc, sl, sc}, file) do
     token = acc |> Enum.reverse() |> Enum.join()
-    [{token, Loc.new(sl, sc, file)} | tokens]
+    length = String.length(token)
+    [{token, Loc.new(sl, sc, length, file)} | tokens]
   end
 
   # Skip to end of line for comments

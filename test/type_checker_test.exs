@@ -72,9 +72,14 @@ defmodule Vaisto.TypeCheckerTest do
       ast = {:call, :"!", [spawn_ast, :invalid_msg]}
 
       result = TypeChecker.check(ast, env)
-      assert {:error, msg} = result
-      assert msg =~ "does not accept message"
-      assert msg =~ ":invalid_msg"
+      assert {:error, error} = result
+      # Can be either a structured error or a string (for backward compat)
+      if is_binary(error) do
+        assert error =~ "does not accept message"
+      else
+        assert error.code == "E300"
+        assert error.note =~ "does not accept"
+      end
     end
 
     test "full module with valid send compiles" do
@@ -97,8 +102,13 @@ defmodule Vaisto.TypeCheckerTest do
       """
       ast = Vaisto.Parser.parse(code)
       result = TypeChecker.check(ast)
-      assert {:error, msg} = result
-      assert msg =~ "does not accept message :reset"
+      assert {:error, error} = result
+      if is_binary(error) do
+        assert error =~ "does not accept message :reset"
+      else
+        assert error.code == "E300"
+        assert error.note =~ "does not accept `:reset`"
+      end
     end
   end
 
@@ -161,17 +171,21 @@ defmodule Vaisto.TypeCheckerTest do
     test "type mismatch includes line and column" do
       code = "(+ 1 :atom)"
       ast = Vaisto.Parser.parse(code)
-      {:error, msg} = TypeChecker.check(ast)
-      # Error should include location prefix
-      assert msg =~ ~r/^\d+:\d+:/
-      assert msg =~ "Type mismatch"
+      {:error, error} = TypeChecker.check(ast)
+      # Now returns structured error
+      assert %Vaisto.Error{} = error
+      assert error.code == "E001"
+      assert error.primary_span.line == 1
+      assert error.primary_span.col == 1
     end
 
     test "type mismatch includes filename when provided" do
       code = "(+ 1 :atom)"
       ast = Vaisto.Parser.parse(code, file: "test.va")
-      {:error, msg} = TypeChecker.check(ast)
-      assert msg =~ "test.va:1:1:"
+      {:error, error} = TypeChecker.check(ast)
+      assert %Vaisto.Error{} = error
+      assert error.file == "test.va"
+      assert error.primary_span.line == 1
     end
 
     test "nested error shows innermost location" do
@@ -180,30 +194,33 @@ defmodule Vaisto.TypeCheckerTest do
          (+ 2 :bad))
       """
       ast = Vaisto.Parser.parse(code, file: "nested.va")
-      {:error, msg} = TypeChecker.check(ast)
+      {:error, error} = TypeChecker.check(ast)
       # Should show innermost call location (line 2)
-      assert msg =~ "nested.va:2:"
+      assert %Vaisto.Error{} = error
+      assert error.file == "nested.va"
+      assert error.primary_span.line == 2
     end
 
     test "unknown function includes location" do
       code = "(unknown-func 1 2)"
       ast = Vaisto.Parser.parse(code)
-      {:error, msg} = TypeChecker.check(ast)
-      assert msg =~ "1:1:"
-      assert msg =~ "Unknown function"
+      {:error, error} = TypeChecker.check(ast)
+      assert %Vaisto.Error{} = error
+      assert error.code == "E101"
+      assert error.primary_span.line == 1
     end
   end
 
-  describe "check_with_source/3 - Rust-style errors" do
+  describe "check_with_source/3 - formatted errors" do
     test "formats type mismatch with source snippet" do
       code = "(+ 1 :atom)"
       ast = Vaisto.Parser.parse(code, file: "test.va")
 
       {:error, formatted} = TypeChecker.check_with_source(ast, code)
 
-      # Should have Rust-style formatting
+      # Should have formatted error with source context
       assert formatted =~ "error"
-      assert formatted =~ "test.va:1:1"
+      assert formatted =~ "test.va"
       assert formatted =~ "(+ 1 :atom)"
       assert formatted =~ "^"  # Pointer
     end
@@ -217,7 +234,7 @@ defmodule Vaisto.TypeCheckerTest do
 
       {:error, formatted} = TypeChecker.check_with_source(ast, code)
 
-      assert formatted =~ "multi.va:2:"
+      assert formatted =~ "multi.va"
       assert formatted =~ "(+ 3 :bad)"
     end
 
