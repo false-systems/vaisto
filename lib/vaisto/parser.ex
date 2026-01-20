@@ -113,6 +113,14 @@ defmodule Vaisto.Parser do
     tokenize_chars(rest, line, col + 2, file, [{"\#{", Loc.new(line, col, 2, file)} | tokens], nil)
   end
 
+  # Backslash escape (start of char literal or escaped symbol): consume backslash + next char
+  defp tokenize_chars(["\\", c | rest], line, col, file, tokens, nil) do
+    tokenize_chars(rest, line, col + 2, file, tokens, {[c, "\\"], line, col})
+  end
+  defp tokenize_chars(["\\", c | rest], line, col, file, tokens, {acc, sl, sc}) do
+    tokenize_chars(rest, line, col + 2, file, tokens, {[c, "\\" | acc], sl, sc})
+  end
+
   # Delimiters: ( ) [ ] { }
   defp tokenize_chars([d | rest], line, col, file, tokens, state) when d in ["(", ")", "[", "]", "{", "}"] do
     tokens = flush_token(tokens, state, file)
@@ -175,6 +183,7 @@ defmodule Vaisto.Parser do
     ast = case Enum.reverse(acc) do
       # Special forms - location passed to parsers
       [:if | rest] -> parse_if(rest, open_loc)
+      [:cond | rest] -> parse_cond(rest, open_loc)
       [:let | rest] -> parse_let(rest, open_loc)
       [:match | rest] -> parse_match(rest, open_loc)
       [:"match-tuple" | rest] -> parse_match_tuple(rest, open_loc)
@@ -369,6 +378,36 @@ defmodule Vaisto.Parser do
   end
   defp parse_if(args, loc) when length(args) > 3 do
     {:error, "if takes exactly 3 arguments, got #{length(args)}", loc}
+  end
+
+  # (cond (test1 body1) (test2 body2) :else body3)
+  # → recursively transforms to nested ifs during parsing
+  # or emits a special :cond node if we want to defer expansion
+  # For simplicity, let's expand to nested ifs here so core emitter doesn't need changes.
+  defp parse_cond(clauses, loc) do
+    case clauses do
+      # :else marked clause
+      [{:bracket, [{:atom, :else}, body]} | rest] ->
+        if rest == [] do
+          body
+        else
+          {:error, ":else clause must be the last clause in cond", loc}
+        end
+
+      # (test body) clause
+      [{:bracket, [test, body]} | rest] ->
+        case parse_cond(rest, loc) do
+          {:error, _, _} = err -> err
+          else_branch -> {:if, test, body, else_branch, loc}
+        end
+
+      # Implicit else at the end? No, enforce :else.
+      [] ->
+        {:error, "cond requires an :else clause as the last argument", loc}
+
+      other ->
+        {:error, "invalid cond syntax: expected (test body) or :else body, got #{inspect(other)}", loc}
+    end
   end
 
   # (let [x 1 y 2] body) → {:let, [{:x, 1}, {:y, 2}], body, loc}
@@ -766,6 +805,9 @@ defmodule Vaisto.Parser do
       # Module path: Std.List → {:module_path, ["Std", "List"]}
       String.contains?(token, ".") and String.match?(token, ~r/^[A-Z]/) ->
         {:module_path, String.split(token, ".")}
+      # Character literal: \c or \name
+      String.starts_with?(token, "\\") ->
+        parse_char_literal(token)
       true -> String.to_atom(token)
     end
   end
@@ -787,4 +829,23 @@ defmodule Vaisto.Parser do
   defp unescape_chars(["\\", "\"" | rest], acc), do: unescape_chars(rest, ["\"" | acc])
   defp unescape_chars(["\\", c | rest], acc), do: unescape_chars(rest, [c | acc])  # Unknown escape: keep char
   defp unescape_chars([c | rest], acc), do: unescape_chars(rest, [c | acc])
+
+  # Character literal parsing
+  # \newline, \space, \tab, \return or \c
+  defp parse_char_literal(token) do
+    content = String.slice(token, 1..-1//1)
+    codepoint = case content do
+      "newline" -> 10
+      "space" -> 32
+      "tab" -> 9
+      "return" -> 13
+      "null" -> 0
+      simple when byte_size(simple) == 1 ->
+        <<c::utf8>> = simple
+        c
+      _ ->
+        raise "Invalid character literal: #{token}"
+    end
+    codepoint
+  end
 end

@@ -2,6 +2,18 @@ defmodule Vaisto.ParserTest do
   use ExUnit.Case
   alias Vaisto.Parser
 
+  describe "character literals" do
+    test "parses named chars" do
+      assert 10 = Parser.parse(~s|\\newline|)
+      assert 32 = Parser.parse(~s|\\space|)
+    end
+
+    test "parses simple chars" do
+      assert 97 = Parser.parse(~s|\\a|)
+      assert 40 = Parser.parse(~s|\\(|)
+    end
+  end
+
   describe "basic expressions" do
     test "parses integers" do
       assert Parser.parse("42") == 42
@@ -25,6 +37,35 @@ defmodule Vaisto.ParserTest do
   end
 
   describe "special forms" do
+    test "parses cond expression" do
+      code = """
+      (cond
+        [(> x 0) :positive]
+        [:else :zero])
+      """
+      # cond transforms to nested if
+      # (if (> x 0) :positive :zero)
+      result = Parser.parse(code)
+      assert {:if, {:call, :>, [:x, 0], _}, {:atom, :positive}, {:atom, :zero}, _} = result
+    end
+
+    test "parses multi-clause cond" do
+      code = """
+      (cond
+        [(> x 0) :positive]
+        [(< x 0) :negative]
+        [:else :zero])
+      """
+      # (if (> x 0) :positive (if (< x 0) :negative :zero))
+      result = Parser.parse(code)
+      assert {:if, _, {:atom, :positive}, {:if, _, {:atom, :negative}, {:atom, :zero}, _}, _} = result
+    end
+
+    test "cond requires else" do
+      code = "(cond [(> x 0) :pos])"
+      assert {:error, "cond requires an :else clause as the last argument", _} = Parser.parse(code)
+    end
+
     test "parses process definition" do
       code = "(process counter 0 :increment (+ state 1))"
       result = Parser.parse(code)
