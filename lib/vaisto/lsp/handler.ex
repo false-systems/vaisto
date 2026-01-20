@@ -5,8 +5,8 @@ defmodule Vaisto.LSP.Handler do
   Dispatches to appropriate handlers based on method name.
   """
 
-  alias Vaisto.LSP.{Protocol, Server}
-  alias Vaisto.{Parser, TypeChecker, ErrorFormatter}
+  alias Vaisto.LSP.{Protocol, Hover}
+  alias Vaisto.{Parser, TypeChecker}
 
   @doc """
   Handle an incoming LSP request/notification.
@@ -188,53 +188,29 @@ defmodule Vaisto.LSP.Handler do
     if text do
       line = pos["line"] + 1  # LSP is 0-indexed
       col = pos["character"] + 1
+      file = uri_to_path(uri)
 
-      hover_content = get_hover_info(text, line, col, uri)
-
-      result = if hover_content do
-        %{
-          "contents" => %{
-            "kind" => "markdown",
-            "value" => hover_content
+      result = case Hover.get_hover(text, line, col, file) do
+        {:ok, hover} ->
+          %{
+            "contents" => %{
+              "kind" => "markdown",
+              "value" => hover.contents
+            },
+            "range" => %{
+              "start" => %{"line" => hover.range.line - 1, "character" => hover.range.col - 1},
+              "end" => %{"line" => hover.range.line - 1, "character" => hover.range.col - 1 + hover.range.length}
+            }
           }
-        }
-      else
-        nil
+
+        :not_found ->
+          nil
       end
 
       {Protocol.response(id, result), state}
     else
       {Protocol.response(id, nil), state}
     end
-  end
-
-  defp get_hover_info(text, line, col, uri) do
-    file = uri_to_path(uri)
-
-    try do
-      ast = Parser.parse(text, file: file)
-      case TypeChecker.check(ast) do
-        {:ok, _type, typed_ast} ->
-          # Find expression at position and get its type
-          case find_expr_at(typed_ast, line, col) do
-            {:ok, _expr, type} ->
-              "```vaisto\n#{Vaisto.Error.format_type(type)}\n```"
-            :not_found ->
-              nil
-          end
-        {:error, _} ->
-          nil
-      end
-    rescue
-      _ -> nil
-    end
-  end
-
-  # Simple position-based expression finder
-  # In a full implementation, this would walk the AST with location info
-  defp find_expr_at(_ast, _line, _col) do
-    # TODO: Implement proper AST traversal with location matching
-    :not_found
   end
 
   # ============================================================================
