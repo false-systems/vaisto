@@ -1,0 +1,89 @@
+; Vaisto File I/O Module
+; Provides file system operations for self-hosting preparation
+;
+; All file operations return Result types for error handling.
+
+(ns Std.File)
+
+; --- Erlang FFI ---
+
+; Read entire file as binary/string
+(extern file/read_file [:string] :any)
+
+; Write binary/string to file
+(extern file/write_file [:string :string] :any)
+
+; Delete a file
+(extern file/delete [:string] :any)
+
+; Get file info
+(extern filelib/is_regular [:string] :bool)
+(extern filelib/is_dir [:string] :bool)
+(extern filelib/file_size [:string] :int)
+
+; Directory operations
+(extern file/list_dir [:string] :any)
+(extern file/make_dir [:string] :any)
+(extern file/del_dir [:string] :any)
+
+; Get current working directory
+(extern file/get_cwd [] :any)
+
+; --- High-Level API ---
+
+; Read a file and return Result
+; (read-file "path") -> (Ok "contents") | (Err reason)
+(defn read-file [path]
+  (from-erlang-result (file/read_file path)))
+
+; Write contents to a file
+; (write-file "path" "contents") -> (Ok :ok) | (Err reason)
+(defn write-file [path contents]
+  (from-erlang-result (file/write_file path contents)))
+
+; Check if a path is a regular file
+; (file? "path") -> true | false
+(defn file? [path] :bool
+  (filelib/is_regular path))
+
+; Check if a path is a directory
+; (dir? "path") -> true | false
+(defn dir? [path] :bool
+  (filelib/is_dir path))
+
+; Get file size in bytes
+; (file-size "path") -> Int
+(defn file-size [path] :int
+  (filelib/file_size path))
+
+; List files in a directory
+; (list-dir "path") -> (Ok [filenames]) | (Err reason)
+(defn list-dir [path]
+  (from-erlang-result (file/list_dir path)))
+
+; Create a directory
+; (mkdir "path") -> (Ok :ok) | (Err reason)
+(defn mkdir [path]
+  (from-erlang-result (file/make_dir path)))
+
+; Delete a file
+; (delete "path") -> (Ok :ok) | (Err reason)
+(defn delete [path]
+  (from-erlang-result (file/delete path)))
+
+; Delete an empty directory
+; (rmdir "path") -> (Ok :ok) | (Err reason)
+(defn rmdir [path]
+  (from-erlang-result (file/del_dir path)))
+
+; Get current working directory
+; (cwd) -> (Ok "path") | (Err reason)
+(defn cwd []
+  (from-erlang-result (file/get_cwd)))
+
+; Check if a file exists (file or directory)
+; (exists? "path") -> true | false
+(defn exists? [path] :bool
+  (if (file? path)
+    true
+    (dir? path)))

@@ -1,0 +1,128 @@
+; Vaisto Binary Module
+; Provides binary/bytecode operations for self-hosting
+;
+; Essential for:
+; - Reading/writing .beam files
+; - Binary pattern construction
+; - Byte-level manipulation
+
+(ns Std.Binary)
+
+; --- Erlang FFI for binary operations ---
+
+; Create binary from list of bytes
+(extern erlang/list_to_binary [(List :int)] :binary)
+
+; Convert binary to list of bytes
+(extern erlang/binary_to_list [:binary] (List :int))
+
+; Get binary size in bytes
+(extern erlang/byte_size [:binary] :int)
+
+; Get binary size in bits
+(extern erlang/bit_size [:binary] :int)
+
+; Concatenate binaries (using iolist)
+(extern erlang/iolist_to_binary [(List :any)] :binary)
+
+; Extract part of binary (start, length)
+(extern binary/part [:binary :int :int] :binary)
+
+; Get byte at index
+(extern binary/at [:binary :int] :int)
+
+; Convert term to binary (serialization)
+(extern erlang/term_to_binary [:any] :binary)
+
+; Convert binary to term (deserialization)
+(extern erlang/binary_to_term [:binary] :any)
+
+; --- BEAM file operations ---
+; These are critical for self-hosting
+
+; Compile forms to beam (returns {:ok, ModName, Binary})
+(extern compile/forms [(List :any)] :any)
+
+; Load a beam binary into the VM
+(extern code/load_binary [:atom :string :binary] :any)
+
+; Get object code for a module (returns {:ok, Beam} or error)
+(extern code/get_object_code [:atom] :any)
+
+; --- High-level API ---
+
+; Create a binary from a list of byte values (0-255)
+; (from-bytes [72 101 108 108 111]) -> <<"Hello">>
+(defn from-bytes [bytes]
+  (erlang/list_to_binary bytes))
+
+; Convert a binary to a list of byte values
+; (to-bytes <<"Hello">>) -> [72 101 108 108 111]
+(defn to-bytes [bin]
+  (erlang/binary_to_list bin))
+
+; Get the size of a binary in bytes
+; (size <<"Hello">>) -> 5
+(defn size [bin] :int
+  (erlang/byte_size bin))
+
+; Concatenate multiple binaries
+; (concat [bin1 bin2 bin3]) -> combined binary
+(defn concat [bins]
+  (erlang/iolist_to_binary bins))
+
+; Get a slice of a binary
+; (slice bin 1 3) -> 3 bytes starting at index 1
+(defn slice [bin start len]
+  (binary/part bin start len))
+
+; Get byte at position
+; (byte-at <<"Hello">> 0) -> 72
+(defn byte-at [bin pos] :int
+  (binary/at bin pos))
+
+; Serialize any Vaisto term to binary
+; Useful for caching compiled forms
+(defn serialize [term]
+  (erlang/term_to_binary term))
+
+; Deserialize binary back to term
+(defn deserialize [bin]
+  (erlang/binary_to_term bin))
+
+; --- BEAM generation helpers ---
+
+; Compile abstract Erlang forms to BEAM bytecode
+; Returns (Ok {:module binary}) or (Err reason)
+;
+; Forms should be Erlang abstract format, e.g.:
+; [{:attribute, 1, :module, :my_mod},
+;  {:attribute, 2, :export, [{:main, 0}]},
+;  {:function, 3, :main, 0, [{:clause, 3, [], [], [{:atom, 3, :ok}]}]}]
+(defn compile-forms [forms]
+  (match (compile/forms forms)
+    [{:ok mod beam} (Ok #{ :module mod :bytecode beam })]
+    [{:ok mod beam _warnings} (Ok #{ :module mod :bytecode beam })]
+    [{:error errors _warnings} (Err errors)]
+    [error (Err error)]))
+
+; Load compiled bytecode into the running VM
+; (load-module :my_mod "my_mod.beam" bytecode)
+(defn load-module [name filename bytecode]
+  (match (code/load_binary name filename bytecode)
+    [{:module mod} (Ok mod)]
+    [{:error reason} (Err reason)]))
+
+; --- File I/O for BEAM files ---
+
+(extern file/write_file [:string :binary] :any)
+(extern file/read_file [:string] :any)
+
+; Write a .beam file to disk
+; Combines binary writing with proper extension
+(defn write-beam [path bytecode]
+  (from-erlang-result (file/write_file path bytecode)))
+
+; Read a .beam file from disk
+(defn read-beam [path]
+  (from-erlang-result (file/read_file path)))

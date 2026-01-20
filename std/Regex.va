@@ -1,0 +1,221 @@
+; Vaisto Regex Module
+; Provides regular expression support using Erlang's :re module
+;
+; Essential for lexing/tokenizing source code in self-hosted compiler
+
+(ns Std.Regex)
+
+; --- Erlang FFI ---
+
+; List functions
+(extern erlang/hd [(List :any)] :any)
+(extern erlang/tl [(List :any)] (List :any))
+(extern erlang/length [(List :any)] :int)
+(extern erlang/byte_size [:binary] :int)
+(extern erlang/iolist_to_binary [(List :any)] :string)
+
+; Binary operations
+(extern binary/part [:binary :int :int] :binary)
+
+; Compile a regex pattern (returns {:ok, MP} or {:error, reason})
+(extern re/compile [:string] :any)
+
+; Run compiled regex against string
+; Returns {:match, Captured} or :nomatch
+(extern re/run [:string :any] :any)
+
+; Run with options (for captures, global matching, etc.)
+(extern re/run [:string :any (List :any)] :any)
+
+; Replace matches in string
+(extern re/replace [:string :any :string] :any)
+
+; Replace all matches
+(extern re/replace [:string :any :string (List :atom)] :any)
+
+; Split string by regex
+(extern re/split [:string :any] :any)
+
+; Split with options
+(extern re/split [:string :any (List :any)] :any)
+
+; --- High-level API ---
+
+; Compile a regex pattern
+; (compile "\\d+") -> (Ok compiled) | (Err reason)
+(defn compile [pattern]
+  (match (re/compile pattern)
+    [{:ok mp} (Ok mp)]
+    [{:error reason} (Err reason)]))
+
+; Test if string matches pattern (returns bool)
+; (matches? "hello123" "\\d+") -> true
+(defn matches? [string pattern] :bool
+  (match (re/run string pattern)
+    [{:match _} true]
+    [:nomatch false]))
+
+; Find first match in string
+; (find "hello123world" "\\d+") -> (Some "123") | None
+(defn find [string pattern]
+  (match (re/run string pattern (list {:capture :first :binary}))
+    [{:match captured} (Some (erlang/hd captured))]
+    [:nomatch (None)]))
+
+; Find all matches in string
+; (find-all "a1b2c3" "\\d") -> ["1" "2" "3"]
+(defn find-all [string pattern]
+  (match (re/run string pattern (list :global {:capture :first :binary}))
+    [{:match matches} (map (fn [x] (erlang/hd x)) matches)]
+    [:nomatch (list)]))
+
+; Find match with position info
+; (find-pos "hello123" "\\d+") -> (Some {:start 5 :len 3 :match "123"}) | None
+(defn find-pos [string pattern]
+  (match (re/run string pattern (list {:capture :first :index}))
+    [{:match [{start len}]}
+      (Some #{ :start start
+               :len len
+               :match (binary/part string start len) })]
+    [:nomatch (None)]))
+
+; Replace first match
+; (replace "hello123" "\\d+" "XXX") -> "helloXXX"
+(defn replace [string pattern replacement]
+  (erlang/iolist_to_binary
+    (re/replace string pattern replacement)))
+
+; Replace all matches
+; (replace-all "a1b2c3" "\\d" "X") -> "aXbXcX"
+(defn replace-all [string pattern replacement]
+  (erlang/iolist_to_binary
+    (re/replace string pattern replacement (list :global))))
+
+; Split string by pattern
+; (split "a,b,,c" ",") -> ["a" "b" "" "c"]
+(defn split [string pattern]
+  (re/split string pattern (list {:return :binary})))
+
+; Split with limit
+; (split-n "a,b,c,d" "," 2) -> ["a" "b,c,d"]
+(defn split-n [string pattern n]
+  (re/split string pattern (list {:return :binary} {:parts n})))
+
+; --- Lexer helpers ---
+
+; Match at start of string only (anchored)
+; Useful for tokenizing: try each pattern until one matches at current position
+; (match-at "123abc" "^\\d+") -> (Some {:match "123" :rest "abc"}) | None
+(defn match-at [string pattern]
+  (match (re/run string pattern (list {:capture :first :index} :anchored))
+    [{:match [{0 len}]}
+      (Some #{ :match (binary/part string 0 len)
+               :rest (binary/part string len (- (erlang/byte_size string) len)) })]
+    [:nomatch (None)]
+    [_ (None)]))
+
+; Match with capture groups at start of string
+; Pattern should have parenthesized groups: "(\\d+)(\\w+)"
+; Returns all captured groups plus the full match
+;
+; (match-groups "123abc rest" "(\\d+)(\\w+)")
+;   -> (Some {:full "123abc"
+;             :groups ["123" "abc"]
+;             :rest " rest"})
+(defn match-groups [string pattern]
+  (match (re/run string pattern (list {:capture :all :index} :anchored))
+    [{:match indices}
+      (let [; First element is the full match
+            {full-start full-len} (erlang/hd indices)
+            ; Rest are capture groups
+            group-indices (erlang/tl indices)
+            ; Extract the actual strings
+            full-match (binary/part string full-start full-len)
+            groups (map (fn [{start len}] (binary/part string start len)) group-indices)
+            ; Calculate rest of string
+            rest-start (+ full-start full-len)
+            rest-len (- (erlang/byte_size string) rest-start)
+            rest (binary/part string rest-start rest-len)]
+        (Some #{ :full full-match
+                 :groups groups
+                 :rest rest }))]
+    [:nomatch (None)]
+    [_ (None)]))
+
+; Try multiple patterns in order, return first match
+; (match-first "123abc" [{"number" "^\\d+"} {"ident" "^[a-z]+"}])
+;   -> (Some {:type "number" :match "123" :rest "abc"})
+(defn match-first [string patterns]
+  (match patterns
+    [[] (None)]
+    [[{type pattern} | rest]
+      (match (match-at string pattern)
+        [(Some m) (Some #{ :type type :match (. m :match) :rest (. m :rest) })]
+        [(None) (match-first string rest)])]))
+
+; Match first pattern with capture groups
+; Each pattern is {type regex} where regex can have groups
+; Returns {:type :full :groups :rest}
+;
+; (match-first-groups input
+;   [{:string "\"([^\"]*)\""} {:number "(\\d+)"}])
+(defn match-first-groups [string patterns]
+  (match patterns
+    [[] (None)]
+    [[{type pattern} | rest]
+      (match (match-groups string pattern)
+        [(Some m) (Some #{ :type type
+                           :full (. m :full)
+                           :groups (. m :groups)
+                           :rest (. m :rest) })]
+        [(None) (match-first-groups string rest)])]))
+
+; --- Position tracking for error messages ---
+
+; Count newlines in a string (for line number tracking)
+(defn count-newlines [string] :int
+  (let [matches (re/run string "\n" (list :global))]
+    (match matches
+      [{:match list} (erlang/length list)]
+      [:nomatch 0])))
+
+; Find column of last line (chars after last newline)
+(defn last-line-length [string] :int
+  (match (find-pos string "\n[^\n]*$")
+    [(Some m) (- (. m :len) 1)]  ; subtract the newline itself
+    [(None) (erlang/byte_size string)]))
+
+; Skip whitespace and track position changes
+; Returns {:skipped :rest :lines :cols}
+; where :lines is newlines crossed, :cols is column offset
+(defn skip-whitespace [string]
+  (match (match-at string "^[ \t\n\r]+")
+    [(Some m)
+      (let [skipped (. m :match)
+            lines (count-newlines skipped)
+            cols (if (> lines 0)
+                   (last-line-length skipped)
+                   (erlang/byte_size skipped))]
+        #{ :skipped skipped
+           :rest (. m :rest)
+           :lines lines
+           :cols cols })]
+    [(None)
+      #{ :skipped ""
+         :rest string
+         :lines 0
+         :cols 0 }]))
+
+; --- Peek without consuming ---
+
+; Look at next n characters without consuming
+; (peek "hello" 3) -> "hel"
+(defn peek [string n]
+  (if (<= n (erlang/byte_size string))
+    (binary/part string 0 n)
+    string))
+
+; Check if string starts with prefix
+; (starts-with? "hello" "hel") -> true
+(defn starts-with? [string prefix] :bool
+  (== (peek string (erlang/byte_size prefix)) prefix))

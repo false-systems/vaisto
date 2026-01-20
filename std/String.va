@@ -59,3 +59,43 @@
 ; Convert integer to string
 (defn from-int [n] :string
   (erlang/integer_to_binary n))
+
+; --- Additional functions for self-hosting ---
+
+; Get first character as integer codepoint (for parsing)
+(extern binary/first [:string] :int)
+
+; Get rest of string after first character
+(extern binary/part [:string :int] :string)
+
+; Get character at index as codepoint
+(extern binary/at [:string :int] :int)
+
+; Check if string starts with prefix
+(extern string/prefix [:string :string] :any)
+
+; Check if string contains substring
+(extern string/find [:string :string] :any)
+
+; Replace all occurrences
+(extern string/replace [:string :string :string] :string)
+
+; Get first byte/character (returns codepoint)
+(defn first-char [s] :int
+  (binary/first s))
+
+; Get rest of string after first byte
+(defn rest [s]
+  (binary/part s 1))
+
+; Check if string starts with given prefix
+(defn starts-with? [s prefix] :bool
+  (match (string/prefix s prefix)
+    [:nomatch false]
+    [_ true]))
+
+; Check if string contains substring
+(defn contains? [s needle] :bool
+  (match (string/find s needle)
+    [:nomatch false]
+    [_ true]))
