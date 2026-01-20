@@ -45,6 +45,38 @@ defmodule Vaisto.ParserTest do
     end
   end
 
+  describe "string escape sequences" do
+    test "parses simple string" do
+      assert {:string, "hello"} = Parser.parse(~s|"hello"|)
+    end
+
+    test "parses newline escape" do
+      assert {:string, "a\nb"} = Parser.parse(~s|"a\\nb"|)
+    end
+
+    test "parses tab escape" do
+      assert {:string, "a\tb"} = Parser.parse(~s|"a\\tb"|)
+    end
+
+    test "parses escaped quote" do
+      assert {:string, ~s|say "hi"|} = Parser.parse(~s|"say \\"hi\\""|)
+    end
+
+    test "parses escaped backslash" do
+      # \\n in source should become literal backslash + n, not newline
+      assert {:string, "a\\nb"} = Parser.parse(~s|"a\\\\nb"|)
+    end
+
+    test "parses escaped backslash followed by escape" do
+      # \\\n in source should become backslash + newline
+      assert {:string, "a\\\nb"} = Parser.parse(~s|"a\\\\\\nb"|)
+    end
+
+    test "parses multiple escapes" do
+      assert {:string, "line1\nline2\tindented"} = Parser.parse(~s|"line1\\nline2\\tindented"|)
+    end
+  end
+
   describe "edge cases" do
     test "handles empty input" do
       assert Parser.parse("") == nil
