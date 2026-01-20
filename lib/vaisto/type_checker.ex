@@ -117,7 +117,6 @@ defmodule Vaisto.TypeChecker do
   def check({:extern, mod, func, arg_types, ret_type, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:extern, mod, func, arg_types, ret_type}, env), loc)
   def check({:list, elements, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:list, elements}, env), loc)
   def check({:unit, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:unit}, env), loc)
-  def check({:match_tuple, expr, clauses, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:match_tuple, expr, clauses}, env), loc)
   def check({:tuple_pattern, elements}, env), do: check_tuple_expr(elements, env)
   def check({:map, pairs, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:map, pairs}, env), loc)
   def check({:map, pairs}, env), do: check_map_literal(pairs, env)
@@ -125,6 +124,16 @@ defmodule Vaisto.TypeChecker do
   def check({:ns, name, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:ns, name}, env), loc)
   def check({:import, module, alias_name, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:import, module, alias_name}, env), loc)
   def check({:do, exprs, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:do, exprs}, env), loc)
+
+  # Bracket expressions: [] or [a b c] used as list literals
+  # Empty bracket [] → empty list
+  def check({:bracket, []}, _env), do: {:ok, {:list, :any}, {:list, [], {:list, :any}}}
+  # Non-empty bracket with cons pattern: [h | t] → this is a pattern, not an expression
+  # (Should only appear in match clauses, not as standalone expression)
+  def check({:bracket, elements}, env) when is_list(elements) do
+    # Treat as list literal: [1 2 3] → (list 1 2 3)
+    check({:list, elements}, env)
+  end
 
   # Do block: (do expr1 expr2 ...) → type of last expression
   def check({:do, []}, _env), do: {:ok, :unit, {:do, [], :unit}}
@@ -478,15 +487,6 @@ defmodule Vaisto.TypeChecker do
     with {:ok, expr_type, typed_expr} <- check(expr, env),
          {:ok, result_type, typed_clauses} <- check_match_clauses(clauses, expr_type, env) do
       {:ok, result_type, {:match, typed_expr, typed_clauses, result_type}}
-    end
-  end
-
-  # Match-tuple expression: (match-tuple expr [{:ok v} body] [{:error e} body2])
-  # Used for interop with raw Erlang tuples - deliberately untyped
-  def check({:match_tuple, expr, clauses}, env) do
-    with {:ok, _expr_type, typed_expr} <- check(expr, env),
-         {:ok, result_type, typed_clauses} <- check_match_tuple_clauses(clauses, env) do
-      {:ok, result_type, {:match_tuple, typed_expr, typed_clauses, result_type}}
     end
   end
 
@@ -1156,80 +1156,6 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
-  # Check match-tuple clauses - patterns are raw Erlang tuples, all bindings are :any
-  defp check_match_tuple_clauses(clauses, env) do
-    results = Enum.map(clauses, fn {pattern, body} ->
-      check_match_tuple_clause(pattern, body, env)
-    end)
-
-    case Enum.find(results, &match?({:error, _}, &1)) do
-      {:error, _} = err -> err
-      nil ->
-        typed_clauses = Enum.map(results, fn {:ok, clause} -> clause end)
-        # All clauses must have the same result type - use the first one
-        [{_pattern, _body, result_type} | _] = typed_clauses
-        {:ok, result_type, typed_clauses}
-    end
-  end
-
-  defp check_match_tuple_clause(pattern, body, env) do
-    # Extract bindings from tuple pattern - all variables get :any type
-    bindings = extract_tuple_pattern_bindings(pattern)
-    extended_env = Enum.reduce(bindings, env, fn {name, type}, acc ->
-      Map.put(acc, name, type)
-    end)
-
-    # Type the pattern itself
-    typed_pattern = type_tuple_pattern(pattern)
-
-    case check(body, extended_env) do
-      {:ok, body_type, typed_body} ->
-        {:ok, {typed_pattern, typed_body, body_type}}
-      error -> error
-    end
-  end
-
-  # Extract variable bindings from a raw tuple pattern
-  # {:tuple_pattern, [{:atom, :ok}, :v]} → [{:v, :any}]
-  defp extract_tuple_pattern_bindings({:tuple_pattern, elements}) do
-    Enum.flat_map(elements, &extract_tuple_element_bindings/1)
-  end
-  defp extract_tuple_pattern_bindings(var) when is_atom(var) and var not in [:_, true, false] do
-    # Catch-all variable pattern
-    [{var, :any}]
-  end
-  defp extract_tuple_pattern_bindings(_), do: []
-
-  defp extract_tuple_element_bindings(var) when is_atom(var) and var not in [:_, true, false] do
-    [{var, :any}]
-  end
-  defp extract_tuple_element_bindings({:tuple_pattern, elements}) do
-    Enum.flat_map(elements, &extract_tuple_element_bindings/1)
-  end
-  defp extract_tuple_element_bindings(_), do: []
-
-  # Type a raw tuple pattern for the typed AST
-  defp type_tuple_pattern({:tuple_pattern, elements}) do
-    typed_elements = Enum.map(elements, &type_tuple_element/1)
-    {:tuple_pattern, typed_elements, :any}
-  end
-  defp type_tuple_pattern(var) when is_atom(var) and var not in [:_, true, false] do
-    {:var, var, :any}
-  end
-  defp type_tuple_pattern(other), do: other
-
-  defp type_tuple_element({:atom, a}), do: {:lit, :atom, a}
-  defp type_tuple_element({:tuple_pattern, elements}) do
-    typed_elements = Enum.map(elements, &type_tuple_element/1)
-    {:tuple_pattern, typed_elements, :any}
-  end
-  defp type_tuple_element(var) when is_atom(var) and var not in [:_, true, false] do
-    {:var, var, :any}
-  end
-  defp type_tuple_element(lit) when is_integer(lit), do: {:lit, :int, lit}
-  defp type_tuple_element(lit) when is_atom(lit), do: {:lit, :atom, lit}
-  defp type_tuple_element(other), do: other
-
   # Extract variable bindings from a pattern with proper types
   # (point x y) matching against {:record, :point, [{:x, :int}, {:y, :int}]}
   # gives [{:x, :int}, {:y, :int}]
@@ -1288,7 +1214,11 @@ defmodule Vaisto.TypeChecker do
   end
 
   # Bracket pattern (list inside pattern): {:bracket, elements}
-  defp extract_pattern_bindings({:bracket, elements}, _type, env) do
+  # elements can be a list [a, b, c] or a cons pattern {:cons, h, t}
+  defp extract_pattern_bindings({:bracket, {:cons, _, _} = cons}, type, env) do
+    extract_pattern_bindings(cons, type, env)
+  end
+  defp extract_pattern_bindings({:bracket, elements}, _type, env) when is_list(elements) do
     Enum.flat_map(elements, fn el -> extract_pattern_bindings(el, :any, env) end)
   end
 
@@ -1386,7 +1316,11 @@ defmodule Vaisto.TypeChecker do
   end
 
   # Bracket pattern (list inside pattern): {:bracket, elements} → list pattern
-  defp type_pattern({:bracket, elements}, _type, env) do
+  # elements can be a list [a, b, c] or a cons pattern {:cons, h, t}
+  defp type_pattern({:bracket, {:cons, _, _} = cons}, type, env) do
+    type_pattern(cons, type, env)
+  end
+  defp type_pattern({:bracket, elements}, _type, env) when is_list(elements) do
     typed_elements = Enum.map(elements, fn el -> type_pattern(el, :any, env) end)
     {:list_pattern, typed_elements, :any}
   end

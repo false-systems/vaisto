@@ -167,11 +167,11 @@ defmodule Vaisto.CoreEmitterTest do
     end
   end
 
-  describe "match-tuple (Erlang interop)" do
-    test "matches raw Erlang-style tuples" do
+  describe "Erlang tuple matching (unified match)" do
+    test "matches raw Erlang-style tuples with match" do
       code = """
       (defn safe-div [x y]
-        (match-tuple (if (== y 0) {:error "div by zero"} {:ok (/ x y)})
+        (match (if (== y 0) {:error "div by zero"} {:ok (/ x y)})
           [{:ok result} result]
           [{:error msg} 0]))
       (safe-div 10 2)
@@ -184,9 +184,9 @@ defmodule Vaisto.CoreEmitterTest do
       assert 5.0 = CoreSafeDiv.main()
     end
 
-    test "matches error case" do
+    test "matches error case with match" do
       code = """
-      (match-tuple {:error 42}
+      (match {:error 42}
         [{:ok v} v]
         [{:error e} (+ e 100)])
       """

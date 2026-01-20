@@ -71,9 +71,9 @@
 ; --- Token helpers ---
 
 ; Get location from any token
-; Using match-tuple for ADT variants (they're represented as tuples)
+; Using match for ADT variants (they're represented as tuples)
 (defn token-loc [tok]
-  (match-tuple tok
+  (match tok
     [{:LParen l} l]
     [{:RParen l} l]
     [{:LBracket l} l]
@@ -104,7 +104,7 @@
 
 ; Check if token is a keyword (special form)
 (defn keyword-token? [tok] :bool
-  (match-tuple tok
+  (match tok
     [{:KwDef _} true]
     [{:KwDefn _} true]
     [{:KwDeftype _} true]
@@ -122,7 +122,7 @@
 
 ; Format token for debugging
 (defn format-token [tok]
-  (match-tuple tok
+  (match tok
     [{:LParen _} "("]
     [{:RParen _} ")"]
     [{:LBracket _} "["]

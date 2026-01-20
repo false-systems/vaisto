@@ -66,19 +66,6 @@ defmodule Vaisto.Emitter do
     {:case, [], [expr_ast, [do: clause_asts]]}
   end
 
-  # Match-tuple expression → Elixir case with raw tuple patterns
-  # (match-tuple x [{:ok v} v]) → case x do {:ok, v} -> v end
-  def to_elixir({:match_tuple, expr, clauses, _type}) do
-    expr_ast = to_elixir(expr)
-    clause_asts = Enum.map(clauses, fn {pattern, body, _body_type} ->
-      pattern_ast = emit_tuple_pattern(pattern)
-      body_ast = to_elixir(body)
-      {:->, [], [[pattern_ast], body_ast]}
-    end)
-
-    {:case, [], [expr_ast, [do: clause_asts]]}
-  end
-
   # Raw tuple expression → Elixir tuple
   # {:tuple, elements, type} → {elem1, elem2, ...}
   def to_elixir({:tuple, elements, _type}) do
@@ -576,24 +563,6 @@ defmodule Vaisto.Emitter do
   defp emit_pattern(:_), do: Macro.var(:_, nil)
   defp emit_pattern(a) when is_atom(a), do: a
   defp emit_pattern(n) when is_integer(n), do: n
-
-  # Raw tuple pattern → Elixir tuple pattern {:ok, v} etc
-  # Used by match-tuple for Erlang interop
-  defp emit_tuple_pattern({:tuple_pattern, elements, _type}) do
-    pattern_elements = Enum.map(elements, &emit_tuple_pattern/1)
-    {:{}, [], pattern_elements}
-  end
-
-  defp emit_tuple_pattern({:var, name, _type}) do
-    Macro.var(name, nil)
-  end
-
-  defp emit_tuple_pattern({:lit, :atom, a}), do: a
-  defp emit_tuple_pattern({:lit, :int, n}), do: n
-  defp emit_tuple_pattern({:lit, :string, s}), do: s
-  defp emit_tuple_pattern(:_), do: Macro.var(:_, nil)
-  defp emit_tuple_pattern(a) when is_atom(a) and a not in [:_, true, false], do: Macro.var(a, nil)
-  defp emit_tuple_pattern(n) when is_integer(n), do: n
 
   # Function head patterns (for multi-clause functions)
   # These patterns are used directly as function arguments

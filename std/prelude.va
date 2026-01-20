@@ -60,7 +60,7 @@
 ; --- Erlang Interop Helpers ---
 ; Convert Erlang {:ok, v} / {:error, e} to Result
 (defn from-erlang-result [tuple]
-  (match-tuple tuple
+  (match tuple
     [{:ok v} (Ok v)]
     [{:error e} (Err e)]))
 

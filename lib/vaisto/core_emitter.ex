@@ -330,21 +330,6 @@ defmodule Vaisto.CoreEmitter do
     :cerl.c_case(expr_core, clause_cores)
   end
 
-  # Match-tuple expression → Core Erlang case with raw tuple patterns
-  # Used for Erlang interop: (match-tuple x [{:ok v} v] [{:error e} 0])
-  defp to_core_expr({:match_tuple, expr, clauses, _type}, user_fns, local_vars) do
-    expr_core = to_core_expr(expr, user_fns, local_vars)
-    clause_cores = Enum.map(clauses, fn {pattern, body, _body_type} ->
-      pattern_core = to_core_tuple_pattern(pattern)
-      # Track pattern variables in the clause body
-      pattern_vars = extract_pattern_vars(pattern)
-      clause_local_vars = MapSet.union(local_vars, MapSet.new(pattern_vars))
-      body_core = to_core_expr(body, user_fns, clause_local_vars)
-      :cerl.c_clause([pattern_core], :cerl.c_atom(true), body_core)
-    end)
-    :cerl.c_case(expr_core, clause_cores)
-  end
-
   # Raw tuple expression: {:tuple, elements, type} → Core Erlang tuple
   defp to_core_expr({:tuple, elements, _type}, user_fns, local_vars) do
     element_cores = Enum.map(elements, &to_core_expr(&1, user_fns, local_vars))
@@ -859,32 +844,6 @@ defmodule Vaisto.CoreEmitter do
 
     :cerl.c_binary([segment])
   end
-
-  # --- Raw tuple pattern transformation (for match-tuple) ---
-
-  # Tuple pattern: {:tuple_pattern, elements, type} → tuple
-  defp to_core_tuple_pattern({:tuple_pattern, elements, _type}) do
-    pattern_elements = Enum.map(elements, &to_core_tuple_pattern/1)
-    :cerl.c_tuple(pattern_elements)
-  end
-
-  # Variable binding
-  defp to_core_tuple_pattern({:var, name, _type}), do: :cerl.c_var(name)
-
-  # Literals
-  defp to_core_tuple_pattern({:lit, :atom, a}), do: :cerl.c_atom(a)
-  defp to_core_tuple_pattern({:lit, :int, n}), do: :cerl.c_int(n)
-  defp to_core_tuple_pattern({:lit, :string, s}), do: :cerl.c_binary(string_to_binary_segments(s))
-
-  # Wildcard
-  defp to_core_tuple_pattern(:_), do: :cerl.c_var(:_)
-
-  # Catch-all variable (plain atom that isn't a keyword)
-  defp to_core_tuple_pattern(a) when is_atom(a) and a not in [:_, true, false] do
-    :cerl.c_var(a)
-  end
-
-  defp to_core_tuple_pattern(n) when is_integer(n), do: :cerl.c_int(n)
 
   # --- Multi-clause function helpers ---
 

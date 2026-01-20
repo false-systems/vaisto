@@ -186,7 +186,6 @@ defmodule Vaisto.Parser do
       [:cond | rest] -> parse_cond(rest, open_loc)
       [:let | rest] -> parse_let(rest, open_loc)
       [:match | rest] -> parse_match(rest, open_loc)
-      [:"match-tuple" | rest] -> parse_match_tuple(rest, open_loc)
       [:receive | rest] -> parse_receive(rest, open_loc)
       [:process | rest] -> parse_process(rest, open_loc)
       [:supervise | rest] -> parse_supervise(rest, open_loc)
@@ -293,8 +292,8 @@ defmodule Vaisto.Parser do
     end
   end
 
-  # Parse brace contents {...} - raw Erlang tuple patterns for match-tuple
-  # {tag arg1 arg2} → {:tuple_pattern, [tag, arg1, arg2]}
+  # Parse brace contents {...} - Erlang tuple literals and patterns
+  # {:ok val} → {:tuple_pattern, [:ok, val]} (used in match and as expressions)
   # Note: acc is built in reverse order for O(1) cons, reversed here on close
   defp parse_brace([{"}", _} | tail], acc, _open_loc) do
     {tail, Enum.reverse(acc)}
@@ -483,42 +482,6 @@ defmodule Vaisto.Parser do
       err -> err
     end
   end
-
-  # (match-tuple expr [{tag args...} body1] [{tag2 args...} body2] ...)
-  # For matching raw Erlang tuples like {:ok, value} or {:error, reason}
-  # → {:match_tuple, expr, [{tuple_pattern, body}, ...], loc}
-  defp parse_match_tuple([expr | clauses], loc) when clauses != [] do
-    case parse_tuple_clauses(clauses, loc) do
-      {:ok, parsed_clauses} -> {:match_tuple, expr, parsed_clauses, loc}
-      {:error, _} = err -> err
-    end
-  end
-  defp parse_match_tuple([_expr], loc) do
-    {:error, "match-tuple requires at least one clause", loc}
-  end
-  defp parse_match_tuple([], loc) do
-    {:error, "match-tuple requires expression and clauses", loc}
-  end
-
-  defp parse_tuple_clauses(clauses, loc) do
-    results = Enum.map(clauses, fn
-      {:bracket, [{:tuple_pattern, elements}, body]} ->
-        {:ok, {{:tuple_pattern, elements}, body}}
-      {:bracket, [pattern, body]} ->
-        {:ok, {pattern, body}}
-      {:bracket, [_pattern]} ->
-        {:error, "match-tuple clause requires a body", loc}
-      {:bracket, []} ->
-        {:error, "match-tuple clause cannot be empty", loc}
-      other ->
-        {:error, "match-tuple clause must be a bracket, got #{inspect(other)}", loc}
-    end)
-    case Enum.find(results, &match?({:error, _, _}, &1)) do
-      nil -> {:ok, Enum.map(results, fn {:ok, c} -> c end)}
-      err -> err
-    end
-  end
-
   # (receive [pattern1 body1] [pattern2 body2] ...) → {:receive, [{pattern, body}, ...], loc}
   # Blocks until a message matching one of the patterns arrives
   defp parse_receive(clauses, loc) when clauses != [] do

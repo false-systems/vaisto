@@ -220,7 +220,7 @@
       (tokenize-loop rest-input acc)]
     ; Got a token - check if EOF or continue
     [(Got tok rest-input)
-      (match-tuple tok
+      (match tok
         [{:EOF _}
           ; Done - reverse accumulated tokens and add EOF
           (lists/reverse (cons tok acc))]
