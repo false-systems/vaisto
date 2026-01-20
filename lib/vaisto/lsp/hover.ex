@@ -414,17 +414,16 @@ defmodule Vaisto.LSP.Hover do
 
   # Find a variable in let bindings
   # Bindings from parser are [{name, value}, ...] or keyword list
-  # NOTE: Column calculation is approximate - assumes standard formatting.
-  # A more robust solution would store exact positions during parsing.
   defp find_in_let_bindings(bindings, name, let_loc) do
-    case Enum.find_index(bindings, fn
+    case Enum.find(bindings, fn
       {bname, _value} -> bname == name
       _ -> false
     end) do
       nil -> :not_found
-      idx ->
-        # Approximate: "(let [" is 6 chars, each binding "x val " is ~4 chars
-        {:ok, %{line: let_loc.line, col: let_loc.col + 6 + idx * 4}}
+      _ ->
+        # We cannot reliably compute the exact column of a binding from formatting,
+        # so return the location of the let form itself as an approximate definition.
+        {:ok, %{line: let_loc.line, col: let_loc.col}}
     end
   end
 
