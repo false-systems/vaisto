@@ -34,6 +34,8 @@ In Elixir, this would be ~50 lines across multiple modules. In Kubernetes, add Y
 - ✅ Parser (s-expressions → AST)
 - ✅ Type checker (basic inference)
 - ✅ Core Erlang emitter (AST → BEAM)
+- ✅ LSP server (hover, diagnostics, symbols)
+- ✅ VS Code extension
 - 🚧 Full Hindley-Milner inference
 - 🚧 Complete OTP mapping
 - 🚧 REPL
@@ -56,6 +58,50 @@ iex> Vaisto.Parser.parse("(+ 1 2)")
 
 iex> Vaisto.Parser.parse("(+ 1 (* 2 3))")
 {:call, :+, [1, {:call, :*, [2, 3]}]}
+```
+
+## Editor Support (VS Code)
+
+Vaisto has an LSP server and VS Code extension for real-time type feedback.
+
+### Quick Setup
+
+```bash
+# 1. Build the compiler
+mix escript.build
+
+# 2. Install the VS Code extension
+cd editors/vscode
+npm install
+```
+
+Then open `editors/vscode` in VS Code and press **F5** to launch the Extension Development Host. Open any `.va` file to get:
+
+| Feature | Shortcut | What it does |
+|---------|----------|--------------|
+| **Hover** | Mouse over | Shows type: `(Int, Int) -> Int` |
+| **Diagnostics** | Automatic | Red squiggles for type/parse errors |
+| **Symbols** | `Cmd+Shift+O` | Jump to functions, types, processes |
+
+### Example
+
+```scheme
+; test.va
+(defn add [a :int b :int] :int
+  (+ a b))
+
+(let [x 42]
+  (add x 1))  ; Hover here → (Int, Int) -> Int
+```
+
+### Configuration
+
+If `vaistoc` isn't in your PATH, add to VS Code settings:
+
+```json
+{
+  "vaisto.serverPath": "/path/to/vaisto/vaistoc"
+}
 ```
 
 ## Compilation Pipeline
