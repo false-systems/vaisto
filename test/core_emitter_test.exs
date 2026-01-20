@@ -208,4 +208,48 @@ defmodule Vaisto.CoreEmitterTest do
       assert {:ok, 42} = CoreTuple.main()
     end
   end
+
+  describe "record field access" do
+    test "accesses first field" do
+      code = """
+      (deftype Point [x :int y :int])
+      (let [p (Point 10 20)]
+        (. p :x))
+      """
+      ast = Parser.parse(code)
+      {:ok, _type, typed} = TypeChecker.check(ast)
+      {:ok, mod, binary} = CoreEmitter.compile(typed, CoreFieldX)
+      :code.load_binary(mod, ~c"test", binary)
+
+      assert 10 = CoreFieldX.main()
+    end
+
+    test "accesses second field" do
+      code = """
+      (deftype Point [x :int y :int])
+      (let [p (Point 10 20)]
+        (. p :y))
+      """
+      ast = Parser.parse(code)
+      {:ok, _type, typed} = TypeChecker.check(ast)
+      {:ok, mod, binary} = CoreEmitter.compile(typed, CoreFieldY)
+      :code.load_binary(mod, ~c"test", binary)
+
+      assert 20 = CoreFieldY.main()
+    end
+
+    test "uses field in expression" do
+      code = """
+      (deftype Point [x :int y :int])
+      (let [p (Point 3 4)]
+        (+ (. p :x) (. p :y)))
+      """
+      ast = Parser.parse(code)
+      {:ok, _type, typed} = TypeChecker.check(ast)
+      {:ok, mod, binary} = CoreEmitter.compile(typed, CoreFieldSum)
+      :code.load_binary(mod, ~c"test", binary)
+
+      assert 7 = CoreFieldSum.main()
+    end
+  end
 end
