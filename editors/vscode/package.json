@@ -1,0 +1,66 @@
+{
+  "name": "vaisto",
+  "displayName": "Vaisto",
+  "description": "Language support for Vaisto - a statically-typed Scheme for the BEAM",
+  "version": "0.1.0",
+  "publisher": "vaisto",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:vaisto"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "vaisto",
+        "aliases": [
+          "Vaisto",
+          "vaisto"
+        ],
+        "extensions": [
+          ".va"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "vaisto",
+        "scopeName": "source.vaisto",
+        "path": "./syntaxes/vaisto.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Vaisto",
+      "properties": {
+        "vaisto.serverPath": {
+          "type": "string",
+          "default": "vaistoc",
+          "description": "Path to the vaistoc executable"
+        },
+        "vaisto.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traces the communication between VS Code and the language server"
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.75.0"
+  }
+}
