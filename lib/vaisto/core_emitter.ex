@@ -59,13 +59,29 @@ defmodule Vaisto.CoreEmitter do
     to_core_process(module_name, handlers)
   end
 
-  # Module with function definitions
+  # Module with function definitions or process
   def to_core({:module, forms}, module_name) do
+    # Check if this module defines a process
+    process_def = Enum.find(forms, fn
+      {:process, _, _, _, _} -> true
+      _ -> false
+    end)
+
+    if process_def do
+      {:process, _name, _init, handlers, _type} = process_def
+      to_core_process(module_name, handlers)
+    else
+      to_core_module_forms(forms, module_name)
+    end
+  end
+
+  defp to_core_module_forms(forms, module_name) do
     # Separate defn forms from other expressions
     {defns, exprs} = Enum.split_with(forms, fn
       {:defn, _, _, _, _} -> true
       {:defn_multi, _, _, _, _} -> true  # 5 elements: name, arity, clauses, type
       {:defval, _, _, _} -> true   # Value bindings
+      {:process, _, _, _, _} -> true # Process definition
       {:deftype, _, _, _} -> true  # Skip deftypes (compile-time only)
       {:extern, _, _, _} -> true   # Skip externs (compile-time only)
       {:ns, _} -> true             # Skip ns (compile-time only)
@@ -73,12 +89,13 @@ defmodule Vaisto.CoreEmitter do
       _ -> false
     end)
 
-    # Filter out deftypes, keep only defns, defn_multi, and defval
+    # Filter out deftypes, keep only defns, defn_multi, defval, and process
     # Note: defn_multi from type checker has 5 elements: {:defn_multi, name, arity, clauses, type}
     defns = Enum.filter(defns, fn
       {:defn, _, _, _, _} -> true
       {:defn_multi, _, _, _, _} -> true
       {:defval, _, _, _} -> true
+      {:process, _, _, _, _} -> true
       _ -> false
     end)
 
@@ -284,6 +301,14 @@ defmodule Vaisto.CoreEmitter do
     |> Enum.reduce(:cerl.c_nil(), fn elem, acc -> :cerl.c_cons(elem, acc) end)
   end
 
+  # Cons expression: [head | tail] → prepend head to tail list
+  defp to_core_expr({:cons, head, tail, _type}, user_fns, local_vars) do
+    :cerl.c_cons(
+      to_core_expr(head, user_fns, local_vars),
+      to_core_expr(tail, user_fns, local_vars)
+    )
+  end
+
   # Variables
   # If the variable is a zero-arity user function (defval), call it
   # Otherwise, it's a regular variable reference
@@ -359,6 +384,23 @@ defmodule Vaisto.CoreEmitter do
     # c_receive(clauses, timeout_expr, timeout_body)
     # infinity timeout, timeout body never executes
     :cerl.c_receive(clause_cores, :cerl.c_atom(:infinity), :cerl.c_atom(:timeout))
+  end
+
+  # Supervise expression → supervisor spec
+  # returns {{Strategy, 1, 5}, [Children]}
+  defp to_core_expr({:supervise, {:atom, strategy}, children, _type}, user_fns, local_vars) do
+    strategy_atom = :cerl.c_atom(strategy)
+    flags = :cerl.c_tuple([strategy_atom, :cerl.c_int(1), :cerl.c_int(5)])
+    
+    child_specs = Enum.map(children, fn child ->
+      to_core_expr(child, user_fns, local_vars)
+    end)
+    
+    child_list = List.foldr(child_specs, :cerl.c_nil(), fn child, acc ->
+      :cerl.c_cons(child, acc)
+    end)
+    
+    :cerl.c_tuple([:cerl.c_atom(:ok), :cerl.c_tuple([flags, child_list])])
   end
 
   # Let bindings: nest each binding as Core Erlang let
@@ -820,9 +862,13 @@ defmodule Vaisto.CoreEmitter do
 
   defp to_core_pattern(n) when is_integer(n), do: :cerl.c_int(n)
 
-  # Wildcard pattern - must be a variable, not an atom literal
-  # In Core Erlang, _ is a variable that matches anything (discarded)
-  defp to_core_pattern(:_), do: :cerl.c_var(:_)
+  # Wildcard pattern - generate a unique variable name for each wildcard
+  # Core Erlang doesn't allow multiple _ variables in the same pattern
+  defp to_core_pattern(:_) do
+    # Generate a unique name for this wildcard using System.unique_integer
+    unique_id = System.unique_integer([:positive])
+    :cerl.c_var(:"_#{unique_id}")
+  end
 
   defp to_core_pattern(a) when is_atom(a), do: :cerl.c_atom(a)
 
@@ -872,8 +918,11 @@ defmodule Vaisto.CoreEmitter do
   defp to_core_multi_pattern({:lit, :atom, a}), do: :cerl.c_atom(a)
   defp to_core_multi_pattern({:lit, :bool, b}), do: :cerl.c_atom(b)
 
-  # Underscore (wildcard)
-  defp to_core_multi_pattern(:_), do: :cerl.c_var(:_)
+  # Underscore (wildcard) - generate unique variable name
+  defp to_core_multi_pattern(:_) do
+    unique_id = System.unique_integer([:positive])
+    :cerl.c_var(:"_#{unique_id}")
+  end
   defp to_core_multi_pattern(a) when is_atom(a), do: :cerl.c_var(a)
   defp to_core_multi_pattern(n) when is_integer(n), do: :cerl.c_int(n)
 

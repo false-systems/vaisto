@@ -124,10 +124,25 @@ defmodule Vaisto.TypeChecker do
   def check({:ns, name, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:ns, name}, env), loc)
   def check({:import, module, alias_name, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:import, module, alias_name}, env), loc)
   def check({:do, exprs, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:do, exprs}, env), loc)
+  # Tuple expression: (tuple :tag a b) → {:tuple, [:tag, a, b], loc}
+  def check({:tuple, elements, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check_tuple_expr(elements, env), loc)
+  def check({:tuple, elements}, env), do: check_tuple_expr(elements, env)
 
   # Bracket expressions: [] or [a b c] used as list literals
   # Empty bracket [] → empty list
   def check({:bracket, []}, _env), do: {:ok, {:list, :any}, {:list, [], {:list, :any}}}
+  # Cons expression: [h | t] → creates a list by prepending h to t
+  def check({:bracket, {:cons, head, tail}}, env) do
+    with {:ok, head_type, typed_head} <- check(head, env),
+         {:ok, tail_type, typed_tail} <- check(tail, env) do
+      # The result is a list containing head_type elements
+      elem_type = case tail_type do
+        {:list, t} -> unify_two_simple(head_type, t)
+        _ -> head_type  # If tail type unknown, use head type
+      end
+      {:ok, {:list, elem_type}, {:cons, typed_head, typed_tail, {:list, elem_type}}}
+    end
+  end
   # Non-empty bracket with cons pattern: [h | t] → this is a pattern, not an expression
   # (Should only appear in match clauses, not as standalone expression)
   def check({:bracket, elements}, env) when is_list(elements) do
@@ -513,14 +528,18 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
-  # Qualified call: (erlang:hd xs)
+  # Qualified call: (erlang:hd xs) or (Vaisto.TypeChecker.Core/empty-subst)
   # Must come before generic function call to match first
   def check({:call, {:qualified, mod, func}, args}, env) do
     # Look up the extern in environment using "mod:func" key
     extern_name = :"#{mod}:#{func}"
     case Map.get(env, extern_name) do
       nil ->
-        {:error, "Unknown extern: #{mod}:#{func}"}
+        # Not registered - allow with :any return type (dynamic typing for interop)
+        # This enables cross-module calls without explicit externs
+        with {:ok, _arg_types, typed_args} <- check_args(args, env) do
+          {:ok, :any, {:call, {:qualified, mod, func}, typed_args, :any}}
+        end
       {:fn, _param_types, ret_type} ->
         with {:ok, _arg_types, typed_args} <- check_args(args, env) do
           # Note: we're not enforcing arg type checking for externs yet
@@ -556,7 +575,7 @@ defmodule Vaisto.TypeChecker do
   def check({:supervise, strategy, children}, env) do
     with :ok <- validate_strategy(strategy),
          {:ok, typed_children} <- check_children(children, env) do
-      {:ok, :supervisor, {:supervise, strategy, typed_children}}
+      {:ok, :supervisor, {:supervise, strategy, typed_children, :supervisor}}
     end
   end
 
@@ -1350,6 +1369,17 @@ defmodule Vaisto.TypeChecker do
   defp extract_multi_pattern_bindings({:list, elements}) do
     Enum.flat_map(elements, &extract_multi_pattern_bindings/1)
   end
+  # Bracket with elements: {:bracket, elements}
+  defp extract_multi_pattern_bindings({:bracket, []}) do
+    []
+  end
+  defp extract_multi_pattern_bindings({:bracket, elements}) when is_list(elements) do
+    Enum.flat_map(elements, &extract_multi_pattern_bindings/1)
+  end
+  # Bracket with cons: {:bracket, {:cons, h, t}}
+  defp extract_multi_pattern_bindings({:bracket, {:cons, _, _} = cons}) do
+    extract_multi_pattern_bindings(cons)
+  end
   # Cons pattern: {:cons, head, tail}
   defp extract_multi_pattern_bindings({:cons, head, tail}) do
     extract_multi_pattern_bindings(head) ++ extract_multi_pattern_bindings(tail)
@@ -1369,6 +1399,19 @@ defmodule Vaisto.TypeChecker do
   end
   defp type_multi_pattern({:list, []}, _env) do
     {:list, [], {:list, :any}}
+  end
+  # Bracket empty list: {:bracket, []} → {:list, [], {:list, :any}}
+  defp type_multi_pattern({:bracket, []}, _env) do
+    {:list, [], {:list, :any}}
+  end
+  # Bracket with elements: {:bracket, elements} → list pattern
+  defp type_multi_pattern({:bracket, elements}, env) when is_list(elements) do
+    typed_elements = Enum.map(elements, &type_multi_pattern(&1, env))
+    {:list, typed_elements, {:list, :any}}
+  end
+  # Bracket with cons: {:bracket, {:cons, h, t}} → cons pattern
+  defp type_multi_pattern({:bracket, {:cons, _, _} = cons}, env) do
+    type_multi_pattern(cons, env)
   end
   defp type_multi_pattern({:list, elements}, env) do
     typed_elements = Enum.map(elements, &type_multi_pattern(&1, env))

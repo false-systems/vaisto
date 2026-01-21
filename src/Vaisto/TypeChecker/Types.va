@@ -13,6 +13,7 @@
 (extern erlang/integer_to_binary [:int] :string)
 (extern erlang/atom_to_binary [:any] :string)
 (extern lists/append [(List :any) (List :any)] (List :any))
+(extern lists/reverse [(List :any)] (List :any))
 
 ; --- Type Variable ---
 ; Fresh type variables for inference: t0, t1, t2, ...

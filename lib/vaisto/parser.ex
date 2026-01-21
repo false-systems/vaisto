@@ -201,6 +201,12 @@ defmodule Vaisto.Parser do
       [:import | rest] -> parse_import(rest, open_loc)
       # List literal: (list 1 2 3) → {:list, [1, 2, 3], loc}
       [:list | elements] -> {:list, elements, open_loc}
+      # Tuple literal: (tuple :tag a b) → {:tuple, [:tag, a, b], loc}
+      # Creates an Erlang tuple at runtime
+      [:tuple | elements] -> {:tuple, elements, open_loc}
+      # Threading macro: (-> x (f a) (g b)) → (g (f x a) b)
+      # Compile-time transformation - zero runtime overhead
+      [:-> | rest] -> parse_thread_first(rest, open_loc)
       # Field access: (. record :field) → {:field_access, record, :field, loc}
       [:. | rest] -> parse_field_access(rest, open_loc)
       # Regular function call
@@ -256,7 +262,7 @@ defmodule Vaisto.Parser do
   defp parse_bracket([{"[", loc} | tail], acc, open_loc) do
     # Nested bracket (e.g., [[]] for empty list pattern)
     {rest, nested} = parse_bracket(tail, [], loc)
-    parse_bracket(rest, [nested | acc], open_loc)
+    parse_bracket(rest, [{:bracket, nested} | acc], open_loc)
   end
 
   defp parse_bracket([{"{", loc} | tail], acc, open_loc) do
@@ -449,6 +455,35 @@ defmodule Vaisto.Parser do
   defp parse_field_access(args, loc) when length(args) > 2 do
     {:error, "field access takes 2 arguments, got #{length(args)}", loc}
   end
+
+  # Threading macro: (-> x (f a) (g b)) → (g (f x a) b)
+  # Thread-first: inserts the threaded value as the FIRST argument of each form
+  # This is a compile-time transformation with zero runtime overhead.
+  #
+  # Examples:
+  #   (-> x (f))       → (f x)
+  #   (-> x (f a))     → (f x a)
+  #   (-> x (f a) (g)) → (g (f x a))
+  #   (-> x f)         → (f x)  ; bare symbol becomes a call
+  defp parse_thread_first([initial | forms], _loc) when forms != [] do
+    Enum.reduce(forms, initial, fn
+      # Case 1: (f arg1 arg2) - function call with args, insert initial as first arg
+      {:call, func, args, loc}, acc ->
+        {:call, func, [acc | args], loc}
+
+      # Case 2: Bare atom 'f' - convert to (f acc)
+      func, acc when is_atom(func) ->
+        {:call, func, [acc], %Vaisto.Parser.Loc{file: "->", line: 0, col: 0, length: 0}}
+    end)
+  end
+  defp parse_thread_first([single], _loc) do
+    # (-> x) with no forms just returns x
+    single
+  end
+  defp parse_thread_first([], loc) do
+    {:error, "threading macro requires at least one value: (-> x (f) ...)", loc}
+  end
+
 
   # (match expr [pattern1 body1] [pattern2 body2] ...) → {:match, expr, [{pattern, body}, ...], loc}
   # (match expr [pattern body] ...) or (match expr [pattern body1 body2 ...] ...)
