@@ -1,0 +1,724 @@
+; Vaisto Self-Hosted Core Emitter
+; Transforms Typed AST → Core Erlang nodes → BEAM bytecode
+;
+; This is the "Final Boss" of self-hosting: we use Vaisto to generate
+; the Core Erlang AST that the BEAM compiler understands.
+;
+; Core Erlang is not text - it's a tree of :cerl nodes built via the
+; cerl module from the Erlang compiler application.
+
+(ns Vaisto.Compiler.CoreEmitter)
+
+; --- The Toolbelt: cerl module constructors ---
+; These build Core Erlang AST nodes
+
+; Literals
+(extern cerl/c_int [:int] :any)
+(extern cerl/c_float [:float] :any)
+(extern cerl/c_atom [:any] :any)
+(extern cerl/c_char [:int] :any)
+
+; Variables and function names
+(extern cerl/c_var [:any] :any)
+(extern cerl/c_fname [:any :int] :any)
+
+; Data structures
+(extern cerl/c_tuple [(List :any)] :any)
+(extern cerl/c_cons [:any :any] :any)
+(extern cerl/c_nil [] :any)
+(extern cerl/c_binary [(List :any)] :any)
+(extern cerl/c_bitstr [:any :any :any :any :any] :any)
+(extern cerl/c_map [(List :any)] :any)
+(extern cerl/c_map_pair [:any :any] :any)
+
+; Control flow
+(extern cerl/c_let [(List :any) :any :any] :any)
+(extern cerl/c_case [:any (List :any)] :any)
+(extern cerl/c_clause [(List :any) :any :any] :any)
+(extern cerl/c_seq [:any :any] :any)
+(extern cerl/c_receive [(List :any) :any :any] :any)
+
+; Functions
+(extern cerl/c_fun [(List :any) :any] :any)
+(extern cerl/c_apply [:any (List :any)] :any)
+(extern cerl/c_call [:any :any (List :any)] :any)
+
+; Module
+(extern cerl/c_module [:any (List :any) (List :any) (List :any)] :any)
+
+; Erlang utilities
+(extern erlang/atom_to_binary [:any :any] :string)
+(extern erlang/binary_to_atom [:string :any] :any)
+(extern erlang/list_to_atom [(List :int)] :any)
+(extern erlang/++ [(List :any) (List :any)] (List :any))
+(extern lists/reverse [(List :any)] (List :any))
+(extern lists/map [:any (List :any)] (List :any))
+(extern lists/foldl [:any :any (List :any)] :any)
+(extern lists/foldr [:any :any (List :any)] :any)
+(extern lists/filter [:any (List :any)] (List :any))
+(extern lists/append [(List :any) (List :any)] (List :any))
+(extern lists/flatten [(List :any)] (List :any))
+(extern lists/keymember [:any :int (List :any)] :bool)
+(extern maps/new [] :any)
+(extern maps/put [:any :any :any] :any)
+(extern maps/get [:any :any :any] :any)
+(extern sets/new [] :any)
+(extern sets/add_element [:any :any] :any)
+(extern sets/from_list [(List :any)] :any)
+(extern sets/is_element [:any :any] :bool)
+(extern sets/union [:any :any] :any)
+(extern compile/forms [:any (List :any)] :any)
+(extern code/load_binary [:any :any :any] :any)
+(extern system/unique_integer [(List :any)] :int)
+
+; --- Main Entry Points ---
+
+; Compile typed AST to BEAM bytecode
+; Returns {:ok module-name binary} or {:error reason}
+(defn compile [typed-ast module-name]
+  (let [core-ast (to-core typed-ast module-name)]
+    (match (compile/forms core-ast (list :from_core :binary :return_errors))
+      [{:ok mod binary} {:ok mod binary}]
+      [{:ok mod binary _warnings} {:ok mod binary}]
+      [{:error errors _warnings} {:error (format-errors errors)}])))
+
+; Compile and load module into VM
+(defn compile-and-load [typed-ast module-name]
+  (match (compile typed-ast module-name)
+    [{:ok mod binary}
+      (do
+        (code/load_binary mod "vaisto" binary)
+        {:ok mod})]
+    [error error]))
+
+; --- Transform to Core Erlang ---
+
+; Module with forms
+(defn to-core [typed-ast module-name]
+  (match typed-ast
+    ; Module with function definitions
+    [{:module forms}
+      (to-core-module-forms forms module-name)]
+
+    ; Single defn → wrap in module
+    [{:defn _ _ _ _}
+      (to-core {:module (list typed-ast)} module-name)]
+
+    ; Single defval → wrap in module
+    [{:defval _ _ _}
+      (to-core {:module (list typed-ast)} module-name)]
+
+    ; Single expression → module with main/0
+    [expr
+      (let [main-body (emit-expr expr (sets/new) (sets/new))
+            main-fun (cerl/c_fun (list) main-body)
+            main-name (cerl/c_fname :main 0)]
+        (cerl/c_module
+          (cerl/c_atom module-name)
+          (list main-name)
+          (list)
+          (list {main-name main-fun})))]))
+
+; Process module forms
+(defn to-core-module-forms [forms module-name]
+  (let [; Separate defn/defval from other expressions
+        defns (lists/filter is-definition? forms)
+        exprs (lists/filter (fn [f] (not (is-definition? f))) forms)
+
+        ; Filter to keep only actual function definitions
+        actual-defns (lists/filter is-actual-defn? defns)
+
+        ; Build user function set for local calls
+        user-fns (build-user-fns-set actual-defns)
+
+        ; Build function definitions
+        fun-defs (lists/map (fn [d] (emit-defn d user-fns)) actual-defns)
+
+        ; Build main/0 from remaining expressions
+        {main-exports main-defs} (build-main exprs user-fns)
+
+        ; Collect all exports
+        fun-exports (lists/map (fn [{fname _}] fname) fun-defs)]
+
+    (cerl/c_module
+      (cerl/c_atom module-name)
+      (lists/append fun-exports main-exports)
+      (list)
+      (lists/append fun-defs main-defs))))
+
+; --- Definition Classification ---
+
+(defn is-definition? [form]
+  (match form
+    [{:defn _ _ _ _} true]
+    [{:defn_multi _ _ _ _} true]
+    [{:defval _ _ _} true]
+    [{:deftype _ _ _} true]
+    [{:extern _ _ _} true]
+    [{:ns _} true]
+    [{:import _ _} true]
+    [_ false]))
+
+(defn is-actual-defn? [form]
+  (match form
+    [{:defn _ _ _ _} true]
+    [{:defn_multi _ _ _ _} true]
+    [{:defval _ _ _} true]
+    [_ false]))
+
+; Build set of {name arity} pairs for user functions
+(defn build-user-fns-set [defns]
+  (let [pairs (lists/map
+                (fn [d]
+                  (match d
+                    [{:defn name params _ _} {name (length params)}]
+                    [{:defn_multi name arity _ _} {name arity}]
+                    [{:defval name _ _} {name 0}]))
+                defns)]
+    (sets/from_list pairs)))
+
+; --- Function Definition Emission ---
+
+(defn emit-defn [defn user-fns]
+  (match defn
+    ; Regular function
+    [{:defn name params body _type}
+      (let [param-vars (lists/map (fn [p] (cerl/c_var p)) params)
+            local-vars (sets/from_list params)
+            body-core (emit-expr body user-fns local-vars)
+            fun (cerl/c_fun param-vars body-core)
+            fname (cerl/c_fname name (length params))]
+        {fname fun})]
+
+    ; Multi-clause function
+    [{:defn_multi name arity clauses _type}
+      (let [; Single argument variable to match on
+            arg-var (cerl/c_var :__arg__)
+            param-vars (list arg-var)
+
+            ; Build case clauses
+            case-clauses (lists/map
+                           (fn [{pattern body _body-type}]
+                             (let [pattern-core (emit-multi-pattern pattern)
+                                   pattern-vars (extract-pattern-vars pattern)
+                                   local-vars (sets/from_list pattern-vars)
+                                   body-core (emit-expr body user-fns local-vars)]
+                               (cerl/c_clause (list pattern-core) (cerl/c_atom true) body-core)))
+                           clauses)
+
+            fun-body (cerl/c_case arg-var case-clauses)
+            fun (cerl/c_fun param-vars fun-body)
+            fname (cerl/c_fname name arity)]
+        {fname fun})]
+
+    ; Value binding → zero-arity function
+    [{:defval name value _type}
+      (let [body-core (emit-expr value user-fns (sets/new))
+            fun (cerl/c_fun (list) body-core)
+            fname (cerl/c_fname name 0)]
+        {fname fun})]))
+
+; Build main/0 from remaining expressions
+(defn build-main [exprs user-fns]
+  (match exprs
+    [[] {(list) (list)}]
+
+    [[single]
+      (let [main-body (emit-expr single user-fns (sets/new))
+            main-fun (cerl/c_fun (list) main-body)
+            main-name (cerl/c_fname :main 0)]
+        {(list main-name) (list {main-name main-fun})})]
+
+    [multiple
+      (let [main-body (emit-do-sequence multiple user-fns (sets/new))
+            main-fun (cerl/c_fun (list) main-body)
+            main-name (cerl/c_fname :main 0)]
+        {(list main-name) (list {main-name main-fun})})]))
+
+; --- Expression Emission ---
+; emit-expr: AST → user-fns → local-vars → Core Erlang node
+
+(defn emit-expr [ast user-fns local-vars]
+  (match ast
+    ; --- Literals ---
+    [{:lit :int n} (cerl/c_int n)]
+    [{:lit :float f} (cerl/c_float f)]
+    [{:lit :atom a} (cerl/c_atom a)]
+    [{:lit :bool b} (cerl/c_atom b)]
+    [{:lit :string s} (emit-string s)]
+
+    ; --- Variables ---
+    [{:var name _type}
+      (cond
+        ; Local variable (let binding, function param)
+        [(sets/is_element name local-vars)
+          (cerl/c_var name)]
+        ; Zero-arity user function (defval) - call it
+        [(sets/is_element {name 0} user-fns)
+          (cerl/c_apply (cerl/c_fname name 0) (list))]
+        ; Regular variable
+        [true (cerl/c_var name)])]
+
+    ; --- Data Structures ---
+    [{:list elements _type}
+      (emit-list elements user-fns local-vars)]
+
+    [{:cons head tail _type}
+      (cerl/c_cons
+        (emit-expr head user-fns local-vars)
+        (emit-expr tail user-fns local-vars))]
+
+    [{:tuple elements _type}
+      (cerl/c_tuple (lists/map (fn [e] (emit-expr e user-fns local-vars)) elements))]
+
+    [{:map pairs _type}
+      (cerl/c_map (lists/map
+                    (fn [{k v}]
+                      (cerl/c_map_pair
+                        (emit-expr k user-fns local-vars)
+                        (emit-expr v user-fns local-vars)))
+                    pairs))]
+
+    ; --- Control Flow ---
+    [{:if condition then-branch else-branch _type}
+      (let [cond-core (emit-expr condition user-fns local-vars)
+            then-core (emit-expr then-branch user-fns local-vars)
+            else-core (emit-expr else-branch user-fns local-vars)
+            true-clause (cerl/c_clause (list (cerl/c_atom true)) (cerl/c_atom true) then-core)
+            false-clause (cerl/c_clause (list (cerl/c_atom false)) (cerl/c_atom true) else-core)]
+        (cerl/c_case cond-core (list true-clause false-clause)))]
+
+    [{:match expr clauses _type}
+      (let [expr-core (emit-expr expr user-fns local-vars)
+            clause-cores (lists/map
+                           (fn [{pattern body _body-type}]
+                             (let [pattern-core (emit-pattern pattern)
+                                   pattern-vars (extract-pattern-vars pattern)
+                                   clause-local-vars (sets/union local-vars (sets/from_list pattern-vars))
+                                   body-core (emit-expr body user-fns clause-local-vars)]
+                               (cerl/c_clause (list pattern-core) (cerl/c_atom true) body-core)))
+                           clauses)]
+        (cerl/c_case expr-core clause-cores))]
+
+    [{:let bindings body _type}
+      (emit-let bindings body user-fns local-vars)]
+
+    [{:do exprs _type}
+      (emit-do-block exprs user-fns local-vars)]
+
+    [{:fn params body _type}
+      (emit-fn params body user-fns local-vars)]
+
+    [{:receive clauses _type}
+      (emit-receive clauses user-fns local-vars)]
+
+    ; --- Function Calls ---
+
+    ; Arithmetic operators
+    [{:call op [left right] _type}
+      (if (is-arith-op? op)
+        (cerl/c_call
+          (cerl/c_atom :erlang)
+          (cerl/c_atom op)
+          (list (emit-expr left user-fns local-vars)
+                (emit-expr right user-fns local-vars)))
+        (emit-call op (list left right) user-fns local-vars))]
+
+    ; Comparison operators
+    [{:call op [left right] _type}
+      (if (is-cmp-op? op)
+        (cerl/c_call
+          (cerl/c_atom :erlang)
+          (cerl/c_atom (cmp-op-to-erlang op))
+          (list (emit-expr left user-fns local-vars)
+                (emit-expr right user-fns local-vars)))
+        (emit-call op (list left right) user-fns local-vars))]
+
+    ; Qualified call: Module/func
+    [{:call {:qualified mod func} args _type}
+      (let [arg-cores (lists/map (fn [a] (emit-expr a user-fns local-vars)) args)]
+        (cerl/c_call (cerl/c_atom mod) (cerl/c_atom func) arg-cores))]
+
+    ; List operations
+    [{:call :head [lst] _type}
+      (cerl/c_call (cerl/c_atom :erlang) (cerl/c_atom :hd)
+        (list (emit-expr lst user-fns local-vars)))]
+
+    [{:call :tail [lst] _type}
+      (cerl/c_call (cerl/c_atom :erlang) (cerl/c_atom :tl)
+        (list (emit-expr lst user-fns local-vars)))]
+
+    [{:call :cons [elem lst] _type}
+      (cerl/c_cons
+        (emit-expr elem user-fns local-vars)
+        (emit-expr lst user-fns local-vars))]
+
+    [{:call :empty? [lst] _type}
+      (cerl/c_call (cerl/c_atom :erlang) (cerl/c_atom :=:=)
+        (list (emit-expr lst user-fns local-vars) (cerl/c_nil)))]
+
+    [{:call :length [lst] _type}
+      (cerl/c_call (cerl/c_atom :erlang) (cerl/c_atom :length)
+        (list (emit-expr lst user-fns local-vars)))]
+
+    ; Record construction: (RecordName args...) where type is {:record RecordName ...}
+    [{:call name args {:record name _fields}}
+      (let [elements (cons (cerl/c_atom name)
+                           (lists/map (fn [a] (emit-expr a user-fns local-vars)) args))]
+        (cerl/c_tuple elements))]
+
+    ; Sum type constructor
+    [{:call name args {:sum _sum-name variants}}
+      (if (lists/keymember name 0 variants)
+        ; Constructor → tagged tuple
+        (let [elements (cons (cerl/c_atom name)
+                             (lists/map (fn [a] (emit-expr a user-fns local-vars)) args))]
+          (cerl/c_tuple elements))
+        ; Regular function call
+        (emit-call name args user-fns local-vars))]
+
+    ; Field access on record
+    [{:field_access record field _type}
+      (emit-field-access record field user-fns local-vars)]
+
+    ; Generic function call
+    [{:call func args _type}
+      (emit-call func args user-fns local-vars)]
+
+    ; --- Raw literals (from untyped AST) ---
+    [n (if (is-integer? n) (cerl/c_int n) (cerl/c_atom n))]))
+
+; --- Call Emission ---
+
+(defn emit-call [func args user-fns local-vars]
+  (let [arity (length args)
+        arg-cores (lists/map (fn [a] (emit-expr a user-fns local-vars)) args)]
+    (cond
+      ; Local variable holding a function
+      [(sets/is_element func local-vars)
+        (cerl/c_apply (cerl/c_var func) arg-cores)]
+      ; User-defined function
+      [(sets/is_element {func arity} user-fns)
+        (cerl/c_apply (cerl/c_fname func arity) arg-cores)]
+      ; External (erlang BIF)
+      [true
+        (cerl/c_call (cerl/c_atom :erlang) (cerl/c_atom func) arg-cores)])))
+
+; --- Let Binding Emission ---
+; Core Erlang let supports one binding at a time, so we nest them
+
+(defn emit-let [bindings body user-fns local-vars]
+  (let [; Collect all bound variable names
+        bound-vars (lists/flatten (lists/map extract-binding-vars bindings))
+        ; Body sees all let-bound vars
+        body-local-vars (sets/union local-vars (sets/from_list bound-vars))
+        body-expr (emit-expr body user-fns body-local-vars)]
+    ; Build from innermost to outermost
+    (lists/foldr
+      (fn [binding acc]
+        (emit-single-binding binding acc user-fns local-vars))
+      body-expr
+      bindings)))
+
+(defn extract-binding-vars [binding]
+  (match binding
+    [{name _ _} (if (is-atom? name) (list name) (extract-pattern-vars name))]
+    [_ (list)]))
+
+(defn emit-single-binding [binding body user-fns local-vars]
+  (match binding
+    ; Simple variable binding
+    [{name expr _type}
+      (if (is-atom? name)
+        (let [var (cerl/c_var name)
+              value (emit-expr expr user-fns local-vars)]
+          (cerl/c_let (list var) value body))
+        ; Pattern destructuring → case expression
+        (let [value (emit-expr expr user-fns local-vars)
+              core-pattern (emit-pattern name)
+              clause (cerl/c_clause (list core-pattern) body)]
+          (cerl/c_case value (list clause))))]))
+
+; --- Do Block Emission ---
+
+(defn emit-do-block [exprs user-fns local-vars]
+  (match exprs
+    [[] (cerl/c_atom :ok)]
+    [[single] (emit-expr single user-fns local-vars)]
+    [[first | rest]
+      (cerl/c_seq
+        (emit-expr first user-fns local-vars)
+        (emit-do-block rest user-fns local-vars))]))
+
+(defn emit-do-sequence [exprs user-fns local-vars]
+  (match exprs
+    [[single] (emit-expr single user-fns local-vars)]
+    [multiple
+      (let [[last | rest-rev] (lists/reverse multiple)
+            rest (lists/reverse rest-rev)]
+        (lists/foldr
+          (fn [expr acc]
+            (cerl/c_seq (emit-expr expr user-fns local-vars) acc))
+          (emit-expr last user-fns local-vars)
+          rest))]))
+
+; --- Anonymous Function Emission ---
+
+(defn emit-fn [params body user-fns local-vars]
+  (let [param-names (lists/flatten (lists/map extract-param-name params))
+        fn-local-vars (sets/union local-vars (sets/from_list param-names))
+        param-vars (lists/map (fn [p] (cerl/c_var p)) param-names)
+        body-core (emit-expr body user-fns fn-local-vars)]
+    (cerl/c_fun param-vars body-core)))
+
+(defn extract-param-name [param]
+  (match param
+    [{:var name _type} (list name)]
+    [name (if (is-atom? name) (list name) (list))]))
+
+; --- Receive Emission ---
+
+(defn emit-receive [clauses user-fns local-vars]
+  (let [clause-cores (lists/map
+                       (fn [{pattern body _body-type}]
+                         (let [pattern-core (emit-pattern pattern)
+                               pattern-vars (extract-pattern-vars pattern)
+                               clause-local-vars (sets/union local-vars (sets/from_list pattern-vars))
+                               body-core (emit-expr body user-fns clause-local-vars)]
+                           (cerl/c_clause (list pattern-core) (cerl/c_atom true) body-core)))
+                       clauses)]
+    ; c_receive(clauses, timeout, timeout_body)
+    (cerl/c_receive clause-cores (cerl/c_atom :infinity) (cerl/c_atom :timeout))))
+
+; --- Field Access Emission ---
+
+(defn emit-field-access [record field user-fns local-vars]
+  (let [record-core (emit-expr record user-fns local-vars)
+        record-type (extract-type record)]
+    (match record-type
+      [{:record _name fields}
+        ; Find field index and use erlang:element
+        (let [field-index (find-field-index field fields 0)
+              tuple-index (+ field-index 2)]  ; 1-indexed, after tag
+          (cerl/c_call
+            (cerl/c_atom :erlang)
+            (cerl/c_atom :element)
+            (list (cerl/c_int tuple-index) record-core)))]
+
+      [{:row _fields _tail}
+        ; Row types are maps
+        (cerl/c_call
+          (cerl/c_atom :maps)
+          (cerl/c_atom :get)
+          (list (cerl/c_atom field) record-core))]
+
+      [_
+        ; Fallback to maps:get
+        (cerl/c_call
+          (cerl/c_atom :maps)
+          (cerl/c_atom :get)
+          (list (cerl/c_atom field) record-core))])))
+
+(defn find-field-index [target fields index]
+  (match fields
+    [[] -1]
+    [[{name _type} | rest]
+      (if (== name target)
+        index
+        (find-field-index target rest (+ index 1)))]))
+
+; --- Pattern Emission ---
+
+(defn emit-pattern [pattern]
+  (match pattern
+    ; Record/constructor pattern
+    [{:pattern name args _type}
+      (let [pattern-args (lists/map emit-pattern args)]
+        (cerl/c_tuple (cons (cerl/c_atom name) pattern-args)))]
+
+    ; Variable pattern
+    [{:var name _type}
+      (cerl/c_var name)]
+
+    ; Atom literal
+    [{:lit :atom value}
+      (cerl/c_atom value)]
+
+    ; Integer literal
+    [{:lit :int value}
+      (cerl/c_int value)]
+
+    ; Tuple pattern
+    [{:tuple_pattern elements _type}
+      (cerl/c_tuple (lists/map emit-pattern elements))]
+
+    ; Empty list pattern
+    [{:list_pattern [] _type}
+      (cerl/c_nil)]
+
+    ; List pattern
+    [{:list_pattern elements _type}
+      (lists/foldr
+        (fn [el acc] (cerl/c_cons (emit-pattern el) acc))
+        (cerl/c_nil)
+        elements)]
+
+    ; Cons pattern
+    [{:cons_pattern head tail _type}
+      (cerl/c_cons (emit-pattern head) (emit-pattern tail))]
+
+    ; Wildcard - generate unique variable
+    [:_
+      (let [unique-id (system/unique_integer (list :positive))]
+        (cerl/c_var (make-wildcard-name unique-id)))]
+
+    ; Raw integer
+    [n (if (is-integer? n) (cerl/c_int n) (cerl/c_atom n))]
+
+    ; Raw atom (variable or literal)
+    [a (if (is-atom? a) (cerl/c_var a) (cerl/c_atom a))]))
+
+; Multi-clause pattern emission (for defn_multi)
+(defn emit-multi-pattern [pattern]
+  (match pattern
+    ; Empty list
+    [{:list [] _type} (cerl/c_nil)]
+
+    ; List with elements
+    [{:list elements _type}
+      (lists/foldr
+        (fn [elem acc] (cerl/c_cons (emit-multi-pattern elem) acc))
+        (cerl/c_nil)
+        elements)]
+
+    ; Cons pattern
+    [{:cons head tail _type}
+      (cerl/c_cons (emit-multi-pattern head) (emit-multi-pattern tail))]
+
+    ; Variable
+    [{:var name _type} (cerl/c_var name)]
+
+    ; Literals
+    [{:lit :int n} (cerl/c_int n)]
+    [{:lit :atom a} (cerl/c_atom a)]
+    [{:lit :bool b} (cerl/c_atom b)]
+
+    ; Wildcard
+    [:_
+      (let [unique-id (system/unique_integer (list :positive))]
+        (cerl/c_var (make-wildcard-name unique-id)))]
+
+    ; Raw values
+    [a (if (is-atom? a) (cerl/c_var a) (cerl/c_int a))]))
+
+; --- Pattern Variable Extraction ---
+
+(defn extract-pattern-vars [pattern]
+  (match pattern
+    [{:var name _type} (list name)]
+    [{:tuple_pattern elements _type}
+      (lists/flatten (lists/map extract-pattern-vars elements))]
+    [{:list elements _type}
+      (lists/flatten (lists/map extract-pattern-vars elements))]
+    [{:list_pattern elements _type}
+      (lists/flatten (lists/map extract-pattern-vars elements))]
+    [{:cons head tail _type}
+      (lists/append (extract-pattern-vars head) (extract-pattern-vars tail))]
+    [{:cons_pattern head tail _type}
+      (lists/append (extract-pattern-vars head) (extract-pattern-vars tail))]
+    [{:pattern _name args _type}
+      (lists/flatten (lists/map extract-pattern-vars args))]
+    [a (if (and (is-atom? a) (not (== a :_))) (list a) (list))]))
+
+; --- Helper Functions ---
+
+(defn emit-list [elements user-fns local-vars]
+  (lists/foldr
+    (fn [elem acc]
+      (cerl/c_cons (emit-expr elem user-fns local-vars) acc))
+    (cerl/c_nil)
+    elements))
+
+(defn emit-string [s]
+  ; Convert string to binary segments
+  (let [bytes (string-to-bytes s)
+        segments (lists/map
+                   (fn [byte]
+                     (cerl/c_bitstr
+                       (cerl/c_int byte)
+                       (cerl/c_int 8)
+                       (cerl/c_int 1)
+                       (cerl/c_atom :integer)
+                       (cerl/c_cons (cerl/c_atom :unsigned)
+                         (cerl/c_cons (cerl/c_atom :big) (cerl/c_nil)))))
+                   bytes)]
+    (cerl/c_binary segments)))
+
+(extern binary/bin_to_list [:string] (List :int))
+(defn string-to-bytes [s]
+  (binary/bin_to_list s))
+
+(defn extract-type [ast]
+  (match ast
+    [{:var _ type} type]
+    [{:call _ _ type} type]
+    [{:field_access _ _ type} type]
+    [{:let _ _ type} type]
+    [{:if _ _ _ type} type]
+    [{:match _ _ type} type]
+    [{:lit type _} type]
+    [{:map _ type} type]
+    [_ :any]))
+
+(defn is-arith-op? [op]
+  (match op
+    [:+ true]
+    [:- true]
+    [:* true]
+    [:/ true]
+    [_ false]))
+
+(defn is-cmp-op? [op]
+  (match op
+    [:== true]
+    [:!= true]
+    [:< true]
+    [:> true]
+    [:<= true]
+    [:>= true]
+    [_ false]))
+
+(defn cmp-op-to-erlang [op]
+  (match op
+    [:== :=:=]
+    [:!= :/=]
+    [_ op]))
+
+(extern erlang/is_integer [:any] :bool)
+(defn is-integer? [x]
+  (erlang/is_integer x))
+
+(extern erlang/is_atom [:any] :bool)
+(defn is-atom? [x]
+  (erlang/is_atom x))
+
+(defn length [lst]
+  (length-acc lst 0))
+
+(defn length-acc [lst acc]
+  (match lst
+    [[] acc]
+    [[_ | rest] (length-acc rest (+ acc 1))]))
+
+(defn make-wildcard-name [id]
+  ; Create atom like :_123
+  (erlang/list_to_atom (cons 95 (integer-to-chars id))))
+
+(extern erlang/integer_to_list [:int] (List :int))
+(defn integer-to-chars [n]
+  (erlang/integer_to_list n))
+
+(defn format-errors [errors]
+  ; Simple error formatting for now
+  errors)
+
