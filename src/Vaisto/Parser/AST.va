@@ -1,0 +1,141 @@
+; Vaisto AST Node Constructors
+;
+; This module provides helper functions to construct AST nodes that match
+; the format expected by the Vaisto TypeChecker (Erlang tuples).
+;
+; The AST format mirrors the Elixir parser output for compatibility.
+
+(ns Vaisto.Parser.AST)
+
+; --- Primitive Nodes ---
+
+(defn int-node [val]
+  val)
+
+(defn float-node [val]
+  val)
+
+(defn atom-node [name]
+  name)
+
+(defn keyword-node [name]
+  {:atom name})
+
+(defn string-node [val]
+  {:string val})
+
+(defn unit-node [loc]
+  {:unit loc})
+
+; --- Expression Nodes ---
+
+; Function call: (func arg1 arg2) → {:call func [args] loc}
+(defn call-node [func args loc]
+  {:call func args loc})
+
+; If expression: (if cond then else) → {:if cond then else loc}
+(defn if-node [cond then else loc]
+  {:if cond then else loc})
+
+; Cond expression: (cond [test body] ...) → {:cond clauses loc}
+(defn cond-node [clauses loc]
+  {:cond clauses loc})
+
+; Match expression: (match expr [pat body] ...) → {:match expr clauses loc}
+(defn match-node [expr clauses loc]
+  {:match expr clauses loc})
+
+; Let binding: (let [x 1 y 2] body) → {:let bindings body loc}
+(defn let-node [bindings body loc]
+  {:let bindings body loc})
+
+; Do block: (do expr1 expr2) → {:do exprs loc}
+(defn do-node [exprs loc]
+  {:do exprs loc})
+
+; Anonymous function: (fn [params] body) → {:fn params body loc}
+(defn fn-node [params body loc]
+  {:fn params body loc})
+
+; Field access: (. record :field) → {:field_access record field loc}
+(defn field-access-node [record field loc]
+  {:field_access record field loc})
+
+; List literal: (list a b c) → {:list elements loc}
+(defn list-node [elements loc]
+  {:list elements loc})
+
+; Tuple literal: (tuple a b c) → {:tuple elements loc}
+(defn tuple-node [elements loc]
+  {:tuple elements loc})
+
+; --- Definition Nodes ---
+
+; Value definition: (def name value) → {:defval name value loc}
+(defn def-node [name value loc]
+  {:defval name value loc})
+
+; Function definition: (defn name [params] body)
+; → {:defn name params body ret-type loc}
+(defn defn-node [name params body ret-type loc]
+  {:defn name params body ret-type loc})
+
+; Multi-clause function: (defn name [[p1] b1] [[p2] b2])
+; → {:defn_multi name clauses loc}
+(defn defn-multi-node [name clauses loc]
+  {:defn_multi name clauses loc})
+
+; Namespace: (ns ModuleName) → {:ns name}
+(defn ns-node [name loc]
+  {:ns name})
+
+; Import: (import Module) → {:import module alias}
+(defn import-node [module alias loc]
+  {:import module alias})
+
+; Extern: (extern mod/func [args] ret) → {:extern mod func arg-types ret-type}
+(defn extern-node [mod func arg-types ret-type loc]
+  {:extern mod func arg-types ret-type})
+
+; --- Type Definition Nodes ---
+
+; Record type: (deftype Point [x :int y :int])
+; → {:deftype name {:product fields} loc}
+(defn deftype-record-node [name fields loc]
+  {:deftype name {:product (parse-record-fields fields)} loc})
+
+; Sum type: (deftype Maybe (Some v) (None))
+; → {:deftype name {:sum variants} loc}
+(defn deftype-sum-node [name variants loc]
+  {:deftype name {:sum (parse-sum-variants variants)} loc})
+
+; --- Helper Functions ---
+
+; Parse record fields: [x :int y :int] → [{x :int} {y :int}]
+(defn parse-record-fields [fields]
+  (parse-record-fields-acc fields (list)))
+
+(extern lists/reverse [(List :any)] (List :any))
+(defn parse-record-fields-acc [fields acc]
+  (match fields
+    [[] (lists/reverse acc)]
+    [[name type | rest]
+      (parse-record-fields-acc rest (cons {name type} acc))]))
+
+; Parse sum type variants: [(Some v) (None)] → [{Some [v]} {None []}]
+(defn parse-sum-variants [variants]
+  (lists/map parse-variant variants))
+
+(defn parse-variant [variant]
+  (match variant
+    ; Call node from parser: {:call CtorName [fields] loc}
+    [{:call ctor fields _loc}
+      {ctor fields}]
+    ; Already a tuple {CtorName [fields]}
+    [{ctor fields}
+      {ctor fields}]
+    ; Bare symbol (nullary constructor)
+    [ctor
+      {ctor (list)}]))
+
+(extern lists/map [:any (List :any)] (List :any))
