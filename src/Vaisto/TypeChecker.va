@@ -1,0 +1,662 @@
+; Vaisto Self-Hosted Type Checker
+; Hindley-Milner type inference with row polymorphism
+;
+; The type checker transforms untyped AST into typed AST,
+; catching type errors at compile time. Two-pass approach:
+; 1. Collect all signatures (functions, types)
+; 2. Type-check bodies with full environment
+
+(ns Vaisto.TypeChecker)
+
+(import Vaisto.TypeChecker.Types)
+(import Vaisto.TypeChecker.Core)
+(import Vaisto.TypeChecker.Context)
+(import Vaisto.TypeChecker.Unify)
+(import Vaisto.TypeChecker.Errors)
+
+; Erlang FFI
+(extern maps/get [:any :any :any] :any)
+(extern maps/put [:any :any :any] :any)
+(extern maps/merge [(List :any)] :any)
+(extern maps/new [] :any)
+(extern maps/keys [:any] (List :any))
+(extern maps/from_list [(List :any)] :any)
+(extern lists/reverse [(List :any)] (List :any))
+(extern lists/map [:any (List :any)] (List :any))
+(extern lists/foldl [:any :any (List :any)] :any)
+(extern lists/keyfind [:any :int (List :any)] :any)
+(extern lists/zip [(List :any) (List :any)] (List :any))
+(extern erlang/hd [(List :any)] :any)
+(extern erlang/tl [(List :any)] (List :any))
+(extern erlang/length [(List :any)] :int)
+(extern erlang/is_integer [:any] :bool)
+(extern erlang/is_float [:any] :bool)
+(extern erlang/is_atom [:any] :bool)
+
+; --- Main Entry Points ---
+
+(defn check [ast env]
+  (match ast
+    ; Module (list of forms)
+    [forms (if (list? forms) (check-module forms env) (check-expr ast env))]))
+
+(defn check-expr [expr env]
+  ; Dispatch based on expression type
+  (match expr
+    ; --- Literals ---
+    [n (if (erlang/is_integer n) (Ok {:type :int :ast {:lit :int n}}) (check-non-int expr env))]
+    [_ (check-non-int expr env)]))
+
+(defn check-non-int [expr env]
+  (match expr
+    ; Float literal
+    [f (if (erlang/is_float f)
+         (Ok {:type :float :ast {:lit :float f}})
+         (check-non-number expr env))]
+    [_ (check-non-number expr env)]))
+
+(defn check-non-number [expr env]
+  (cond
+    [(== expr true) (Ok {:type :bool :ast {:lit :bool true}})]
+    [(== expr false) (Ok {:type :bool :ast {:lit :bool false}})]
+    [:else (check-structured expr env)]))
+
+(defn check-structured [expr env]
+  (match expr
+    ; String literal
+    [{:string s} (Ok {:type :string :ast {:lit :string s}})]
+
+    ; Atom literal
+    [{:atom a} (Ok {:type {:atom a} :ast {:lit :atom a}})]
+
+    ; Variable reference
+    [{:var name} (check-var name env)]
+
+    ; Bare atom - could be variable or literal
+    [a (if (erlang/is_atom a) (check-atom-or-var a env) (check-compound expr env))]
+
+    [_ (check-compound expr env)]))
+
+(defn check-atom-or-var [a env]
+  (let [lookup (maps/get a env :not-found)]
+    (match lookup
+      [:not-found (Ok {:type {:atom a} :ast {:lit :atom a}})]
+      [t (Ok {:type t :ast {:var a t}})])))
+
+(defn check-var [name env]
+  (let [lookup (maps/get name env :not-found)]
+    (match lookup
+      [:not-found (Err (Vaisto.TypeChecker.Errors/undefined-variable name))]
+      [t (Ok {:type t :ast {:var name t}})])))
+
+(defn check-compound [expr env]
+  (match expr
+    ; List literal
+    [{:list elements} (check-list elements env)]
+
+    ; Empty bracket = empty list
+    [{:bracket []} (Ok {:type {:list :any} :ast {:list (list) {:list :any}}})]
+
+    ; Non-empty bracket = list
+    [{:bracket elements} (check-list elements env)]
+
+    ; Tuple expression (Erlang interop)
+    [{:tuple_pattern elements} (check-tuple-expr elements env)]
+
+    ; Map literal
+    [{:map pairs} (check-map pairs env)]
+
+    ; Field access
+    [{:field_access record field} (check-field-access record field env)]
+
+    ; If expression
+    [{:if cond then-b else-b} (check-if cond then-b else-b env)]
+
+    ; Let binding
+    [{:let bindings body} (check-let bindings body env)]
+
+    ; Match expression
+    [{:match expr clauses} (check-match expr clauses env)]
+
+    ; Do block
+    [{:do exprs} (check-do exprs env)]
+
+    ; Anonymous function
+    [{:fn params body} (check-fn params body env)]
+
+    ; Function call
+    [{:call func args} (check-call func args env)]
+
+    ; Function definition
+    [{:defn name params body ret-type} (check-defn name params body ret-type env)]
+
+    ; Type definition
+    [{:deftype name fields} (check-deftype name fields env)]
+
+    ; Extern declaration
+    [{:extern mod func arg-types ret-type} (check-extern mod func arg-types ret-type env)]
+
+    ; Module namespace
+    [{:ns name} (Ok {:type :ns :ast {:ns name}})]
+
+    ; Import
+    [{:import module alias} (Ok {:type :import :ast {:import module alias}})]
+
+    ; Unknown
+    [_ (Err (Vaisto.TypeChecker.Errors/make-error "unknown expression"))]))
+
+; --- List Type Checking ---
+
+(defn check-list [elements env]
+  (match elements
+    [[] (Ok {:type {:list :any} :ast {:list (list) {:list :any}}})]
+    [[first | rest]
+      (match (check-expr first env)
+        [(Ok first-result)
+          (let [elem-type (. first-result :type)
+                first-ast (. first-result :ast)]
+            (match (check-list-elements rest elem-type env (list first-ast))
+              [(Ok result) (Ok {:type {:list elem-type} :ast {:list (. result :asts) {:list elem-type}}})]
+              [(Err e) (Err e)]))]
+        [(Err e) (Err e)])]))
+
+(defn check-list-elements [elements elem-type env acc]
+  (match elements
+    [[] (Ok {:asts (lists/reverse acc)})]
+    [[e | rest]
+      (match (check-expr e env)
+        [(Ok result)
+          (if (types-match? elem-type (. result :type))
+            (check-list-elements rest elem-type env (cons (. result :ast) acc))
+            (Err (Vaisto.TypeChecker.Errors/list-type-mismatch elem-type (. result :type))))]
+        [(Err err) (Err err)])]))
+
+; --- Tuple Expression (Erlang Interop) ---
+
+(defn check-tuple-expr [elements env]
+  (match (check-args elements env)
+    [(Ok result)
+      ; Tuples are :any for Erlang interop flexibility
+      (Ok {:type :any :ast {:tuple (. result :asts) :any}})]
+    [(Err e) (Err e)]))
+
+; --- Map Literal ---
+
+(defn check-map [pairs env]
+  (match (check-map-pairs pairs env (list) (list))
+    [(Ok result)
+      (let [row-type {:row (. result :fields) :closed}]
+        (Ok {:type row-type :ast {:map (. result :asts) row-type}}))]
+    [(Err e) (Err e)]))
+
+(defn check-map-pairs [pairs env fields-acc asts-acc]
+  (match pairs
+    [[] (Ok {:fields (lists/reverse fields-acc) :asts (lists/reverse asts-acc)})]
+    [[{key-expr val-expr} | rest]
+      (match (check-expr key-expr env)
+        [(Ok key-result)
+          (match (check-expr val-expr env)
+            [(Ok val-result)
+              (let [field-name (extract-atom-key (. key-result :ast))
+                    new-fields (cons {field-name (. val-result :type)} fields-acc)
+                    new-asts (cons {(. key-result :ast) (. val-result :ast)} asts-acc)]
+                (check-map-pairs rest env new-fields new-asts))]
+            [(Err e) (Err e)])]
+        [(Err e) (Err e)])]))
+
+(defn extract-atom-key [ast]
+  (match ast
+    [{:lit :atom a} a]
+    [_ :dynamic]))
+
+; --- Field Access ---
+
+(defn check-field-access [record-expr field env]
+  (match (check-expr record-expr env)
+    [(Ok result)
+      (let [record-type (. result :type)]
+        (match (lookup-field record-type field)
+          [(Ok field-type)
+            (Ok {:type field-type :ast {:field_access (. result :ast) field field-type}})]
+          [(Err e) (Err e)]))]
+    [(Err e) (Err e)]))
+
+(defn lookup-field [record-type field]
+  (match record-type
+    [{:record _name fields}
+      (match (lists/keyfind field 1 fields)
+        [false (Err (Vaisto.TypeChecker.Errors/make-error "field not found"))]
+        [{_ field-type} (Ok field-type)])]
+    [{:row fields _tail}
+      (match (lists/keyfind field 1 fields)
+        [false (Ok :any)]  ; Row polymorphism - field might be in tail
+        [{_ field-type} (Ok field-type)])]
+    [:any (Ok :any)]
+    [_ (Err (Vaisto.TypeChecker.Errors/make-error "field access requires record type"))]))
+
+; --- If Expression ---
+
+(defn check-if [cond-expr then-expr else-expr env]
+  (match (check-expr cond-expr env)
+    [(Ok cond-result)
+      (if (not (types-match? :bool (. cond-result :type)))
+        (Err (Vaisto.TypeChecker.Errors/type-mismatch :bool (. cond-result :type)))
+        (match (check-expr then-expr env)
+          [(Ok then-result)
+            (match (check-expr else-expr env)
+              [(Ok else-result)
+                (if (types-match? (. then-result :type) (. else-result :type))
+                  (Ok {:type (. then-result :type)
+                       :ast {:if (. cond-result :ast) (. then-result :ast) (. else-result :ast) (. then-result :type)}})
+                  (Err (Vaisto.TypeChecker.Errors/branch-type-mismatch (. then-result :type) (. else-result :type))))]
+              [(Err e) (Err e)])]
+          [(Err e) (Err e)]))]
+    [(Err e) (Err e)]))
+
+; --- Let Binding ---
+
+(defn check-let [bindings body env]
+  (match (check-bindings bindings env (list))
+    [(Ok result)
+      (match (check-expr body (. result :env))
+        [(Ok body-result)
+          (Ok {:type (. body-result :type)
+               :ast {:let (. result :typed-bindings) (. body-result :ast) (. body-result :type)}})]
+        [(Err e) (Err e)])]
+    [(Err e) (Err e)]))
+
+(defn check-bindings [bindings env acc]
+  (match bindings
+    [[] (Ok {:env env :typed-bindings (lists/reverse acc)})]
+    [[{name expr} | rest]
+      (match (check-expr expr env)
+        [(Ok result)
+          (let [new-env (maps/put name (. result :type) env)
+                typed-binding {name (. result :ast) (. result :type)}]
+            (check-bindings rest new-env (cons typed-binding acc)))]
+        [(Err e) (Err e)])]))
+
+; --- Match Expression ---
+
+(defn check-match [expr clauses env]
+  (match (check-expr expr env)
+    [(Ok expr-result)
+      (match (check-match-clauses clauses (. expr-result :type) env)
+        [(Ok clauses-result)
+          (Ok {:type (. clauses-result :type)
+               :ast {:match (. expr-result :ast) (. clauses-result :clauses) (. clauses-result :type)}})]
+        [(Err e) (Err e)])]
+    [(Err e) (Err e)]))
+
+(defn check-match-clauses [clauses expr-type env]
+  (match clauses
+    [[] (Err (Vaisto.TypeChecker.Errors/make-error "empty match"))]
+    [[{pattern body} | rest]
+      (match (check-match-clause pattern body expr-type env)
+        [(Ok first-result)
+          (match (check-remaining-clauses rest expr-type (. first-result :body-type) env (list (. first-result :clause)))
+            [(Ok clauses) (Ok {:type (. first-result :body-type) :clauses clauses})]
+            [(Err e) (Err e)])]
+        [(Err e) (Err e)])]))
+
+(defn check-match-clause [pattern body expr-type env]
+  (let [bindings (extract-pattern-bindings pattern expr-type env)
+        extended-env (extend-env-with-bindings env bindings)
+        typed-pattern (type-pattern pattern expr-type env)]
+    (match (check-expr body extended-env)
+      [(Ok body-result)
+        (Ok {:clause {typed-pattern (. body-result :ast) (. body-result :type)}
+             :body-type (. body-result :type)})]
+      [(Err e) (Err e)])))
+
+(defn check-remaining-clauses [clauses expr-type expected-type env acc]
+  (match clauses
+    [[] (Ok (lists/reverse acc))]
+    [[{pattern body} | rest]
+      (match (check-match-clause pattern body expr-type env)
+        [(Ok result)
+          (if (types-match? expected-type (. result :body-type))
+            (check-remaining-clauses rest expr-type expected-type env (cons (. result :clause) acc))
+            (Err (Vaisto.TypeChecker.Errors/branch-type-mismatch expected-type (. result :body-type))))]
+        [(Err e) (Err e)])]))
+
+; --- Do Block ---
+
+(defn check-do [exprs env]
+  (match exprs
+    [[] (Ok {:type :unit :ast {:do (list) :unit}})]
+    [_ (check-do-exprs exprs env (list))]))
+
+(defn check-do-exprs [exprs env acc]
+  (match exprs
+    [[] (Err (Vaisto.TypeChecker.Errors/make-error "empty do block"))]
+    [[last-expr]
+      (match (check-expr last-expr env)
+        [(Ok result)
+          (Ok {:type (. result :type)
+               :ast {:do (lists/reverse (cons (. result :ast) acc)) (. result :type)}})]
+        [(Err e) (Err e)])]
+    [[expr | rest]
+      (match (check-expr expr env)
+        [(Ok result) (check-do-exprs rest env (cons (. result :ast) acc))]
+        [(Err e) (Err e)])]))
+
+; --- Anonymous Function ---
+
+(defn check-fn [params body env]
+  (let [param-types (lists/map (fn [_] :any) params)
+        param-bindings (lists/zip params param-types)
+        extended-env (extend-env-with-bindings env param-bindings)]
+    (match (check-expr body extended-env)
+      [(Ok body-result)
+        (let [func-type {:fn param-types (. body-result :type)}]
+          (Ok {:type func-type
+               :ast {:fn params (. body-result :ast) func-type}}))]
+      [(Err e) (Err e)])))
+
+; --- Function Call ---
+
+(defn check-call [func args env]
+  (match (lookup-function func env)
+    [(Ok func-type)
+      (match (check-args args env)
+        [(Ok args-result)
+          (match (unify-call func-type (. args-result :types))
+            [(Ok ret-type)
+              (Ok {:type ret-type :ast {:call func (. args-result :asts) ret-type}})]
+            [(Err e) (Err e)])]
+        [(Err e) (Err e)])]
+    [(Err e) (Err e)]))
+
+(defn lookup-function [func env]
+  (let [result (maps/get func env :not-found)]
+    (match result
+      [:not-found (Err (Vaisto.TypeChecker.Errors/unknown-function func))]
+      [t (Ok t)])))
+
+(defn check-args [args env]
+  (check-args-acc args env (list) (list)))
+
+(defn check-args-acc [args env types-acc asts-acc]
+  (match args
+    [[] (Ok {:types (lists/reverse types-acc) :asts (lists/reverse asts-acc)})]
+    [[arg | rest]
+      (match (check-expr arg env)
+        [(Ok result)
+          (check-args-acc rest env
+            (cons (. result :type) types-acc)
+            (cons (. result :ast) asts-acc))]
+        [(Err e) (Err e)])]))
+
+(defn unify-call [func-type arg-types]
+  (match func-type
+    [{:fn expected-args ret-type}
+      (if (!= (erlang/length expected-args) (erlang/length arg-types))
+        (Err (Vaisto.TypeChecker.Errors/arity-mismatch :function (erlang/length expected-args) (erlang/length arg-types)))
+        (match (check-arg-types expected-args arg-types)
+          [(Ok _) (Ok ret-type)]
+          [(Err e) (Err e)]))]
+    [:any (Ok :any)]
+    [_ (Err (Vaisto.TypeChecker.Errors/not-a-function :call func-type))]))
+
+(defn check-arg-types [expected actual]
+  (match {expected actual}
+    [{[] []} (Ok :ok)]
+    [{[e | erest] [a | arest]}
+      (if (types-match? e a)
+        (check-arg-types erest arest)
+        (Err (Vaisto.TypeChecker.Errors/type-mismatch e a)))]
+    [_ (Err (Vaisto.TypeChecker.Errors/make-error "arg count mismatch"))]))
+
+; --- Function Definition ---
+
+(defn check-defn [name params body ret-type env]
+  (let [param-names (lists/map (fn [p] (match p [{n _} n])) params)
+        param-types (lists/map (fn [p] (match p [{_ t} t])) params)
+        param-bindings (lists/zip param-names param-types)
+        self-type {:fn param-types ret-type}
+        extended-env (-> env
+                        (extend-env-with-bindings param-bindings)
+                        (maps/put name self-type))]
+    (match (check-expr body extended-env)
+      [(Ok body-result)
+        (if (types-match? ret-type (. body-result :type))
+          (let [func-type {:fn param-types (. body-result :type)}]
+            (Ok {:type func-type
+                 :ast {:defn name param-names (. body-result :ast) func-type}}))
+          (Err (Vaisto.TypeChecker.Errors/return-type-mismatch ret-type (. body-result :type))))]
+      [(Err e) (Err e)])))
+
+; --- Type Definition ---
+
+(defn check-deftype [name fields env]
+  (match fields
+    [{:product fields}
+      (let [record-type {:record name fields}]
+        (Ok {:type record-type :ast {:deftype name {:product fields} record-type}}))]
+    [{:sum variants}
+      (let [sum-type {:sum name variants}]
+        (Ok {:type sum-type :ast {:deftype name {:sum variants} sum-type}}))]
+    [_ ; Legacy: treat as product
+      (let [record-type {:record name fields}]
+        (Ok {:type record-type :ast {:deftype name {:product fields} record-type}}))]))
+
+; --- Extern Declaration ---
+
+(defn check-extern [mod func arg-types ret-type env]
+  (let [func-type {:fn arg-types ret-type}]
+    (Ok {:type :extern :ast {:extern mod func func-type}})))
+
+; --- Module Checking (Two-Pass) ---
+
+(defn check-module [forms env]
+  ; First pass: collect signatures
+  (let [env-with-sigs (collect-signatures forms env)]
+    ; Second pass: type-check bodies
+    (check-module-forms forms env-with-sigs (list))))
+
+(defn collect-signatures [forms env]
+  (lists/foldl
+    (fn [form acc-env]
+      (match form
+        [{:defn name params _body ret-type}
+          (let [param-types (lists/map (fn [p] (match p [{_ t} t])) params)]
+            (maps/put name {:fn param-types ret-type} acc-env))]
+        [{:deftype name {:product fields}}
+          (let [field-types (lists/map (fn [f] (match f [{_ t} t])) fields)
+                record-type {:record name fields}
+                ctor-type {:fn field-types record-type}]
+            (maps/put name ctor-type acc-env))]
+        [{:deftype name {:sum variants}}
+          (let [sum-type {:sum name variants}
+                env-with-type (maps/put name sum-type acc-env)]
+            (register-variant-ctors variants sum-type env-with-type))]
+        [{:extern mod func arg-types ret-type}
+          (let [extern-name (make-extern-name mod func)
+                func-type {:fn arg-types ret-type}]
+            (maps/put extern-name func-type acc-env))]
+        [_ acc-env]))
+    env
+    forms))
+
+(defn register-variant-ctors [variants sum-type env]
+  (lists/foldl
+    (fn [variant acc]
+      (match variant
+        [{ctor-name field-types}
+          (maps/put ctor-name {:fn field-types sum-type} acc)]))
+    env
+    variants))
+
+(defn make-extern-name [mod func]
+  ; Create atom like :"mod:func"
+  {:qualified mod func})
+
+(defn check-module-forms [forms env acc]
+  (match forms
+    [[] (Ok {:type :module :ast {:module (lists/reverse acc)}})]
+    [[form | rest]
+      (match (check-expr form env)
+        [(Ok result)
+          (check-module-forms rest env (cons (. result :ast) acc))]
+        [(Err e) (Err e)])]))
+
+; --- Helper Functions ---
+
+(defn types-match? [t1 t2]
+  (cond
+    [(== t1 :any) true]
+    [(== t2 :any) true]
+    [(== t1 t2) true]
+    [(tvar-match? t1 t2) true]
+    [(list-match? t1 t2) true]
+    [(fn-match? t1 t2) true]
+    [:else false]))
+
+(defn tvar-match? [t1 t2]
+  (match {t1 t2}
+    [{{:tvar _} _} true]
+    [{_ {:tvar _}} true]
+    [_ false]))
+
+(defn list-match? [t1 t2]
+  (match {t1 t2}
+    [{{:list e1} {:list e2}} (types-match? e1 e2)]
+    [_ false]))
+
+(defn fn-match? [t1 t2]
+  (match {t1 t2}
+    [{{:fn a1 r1} {:fn a2 r2}}
+      (if (!= (erlang/length a1) (erlang/length a2))
+        false
+        (fn-args-match? a1 a2 r1 r2))]
+    [_ false]))
+
+(defn fn-args-match? [args1 args2 ret1 ret2]
+  (match {args1 args2}
+    [{[] []} (types-match? ret1 ret2)]
+    [{[a1 | r1] [a2 | r2]}
+      (if (types-match? a1 a2)
+        (fn-args-match? r1 r2 ret1 ret2)
+        false)]
+    [_ false]))
+
+(defn list? [v]
+  (match v
+    [[] true]
+    [[_ | _] true]
+    [_ false]))
+
+(defn extend-env-with-bindings [env bindings]
+  (lists/foldl
+    (fn [binding acc]
+      (match binding
+        [{name type} (maps/put name type acc)]))
+    env
+    bindings))
+
+; --- Pattern Binding Extraction ---
+
+(defn extract-pattern-bindings [pattern expr-type env]
+  (match pattern
+    ; Variable pattern
+    [v (if (erlang/is_atom v)
+         (if (== v :_)
+           (list)
+           (list {v expr-type}))
+         (extract-compound-pattern pattern expr-type env))]
+    [_ (extract-compound-pattern pattern expr-type env)]))
+
+(defn extract-compound-pattern [pattern expr-type env]
+  (match pattern
+    ; Tuple pattern
+    [{:tuple_pattern elements}
+      (lists/foldl
+        (fn [el acc]
+          (lists/append acc (extract-pattern-bindings el :any env)))
+        (list)
+        elements)]
+    ; Cons pattern
+    [{:cons head tail}
+      (lists/append
+        (extract-pattern-bindings head :any env)
+        (extract-pattern-bindings tail :any env))]
+    ; Constructor pattern (ADT variant or record)
+    [{:call ctor-name args}
+      (extract-ctor-pattern-bindings ctor-name args expr-type env)]
+    ; Atom literal
+    [{:atom _} (list)]
+    ; Other literals
+    [_ (list)]))
+
+(defn extract-ctor-pattern-bindings [ctor-name args expr-type env]
+  (match expr-type
+    [{:record name fields}
+      (extract-record-pattern-bindings args fields)]
+    [{:sum name variants}
+      (extract-variant-pattern-bindings ctor-name args variants)]
+    [:any
+      (lists/foldl
+        (fn [arg acc]
+          (lists/append acc (extract-pattern-bindings arg :any env)))
+        (list)
+        args)]
+    [_ (list)]))
+
+(defn extract-record-pattern-bindings [args fields]
+  (lists/foldl
+    (fn [pair acc]
+      (match pair
+        [{arg {_name field-type}}
+          (if (erlang/is_atom arg)
+            (if (== arg :_)
+              acc
+              (cons {arg field-type} acc))
+            acc)]))
+    (list)
+    (lists/zip args fields)))
+
+(defn extract-variant-pattern-bindings [ctor-name args variants]
+  (match (lists/keyfind ctor-name 1 variants)
+    [false (list)]
+    [{_ field-types}
+      (lists/foldl
+        (fn [pair acc]
+          (match pair
+            [{arg field-type}
+              (if (erlang/is_atom arg)
+                (if (== arg :_)
+                  acc
+                  (cons {arg field-type} acc))
+                acc)]))
+        (list)
+        (lists/zip args field-types))]))
+
+; --- Pattern Typing ---
+
+(defn type-pattern [pattern expr-type env]
+  (match pattern
+    [v (if (erlang/is_atom v)
+         (if (== v :_)
+           :_
+           {:var v expr-type})
+         (type-compound-pattern pattern expr-type env))]
+    [_ (type-compound-pattern pattern expr-type env)]))
+
+(defn type-compound-pattern [pattern expr-type env]
+  (match pattern
+    [{:tuple_pattern elements}
+      {:tuple_pattern (lists/map (fn [e] (type-pattern e :any env)) elements) :any}]
+    [{:cons head tail}
+      {:cons_pattern (type-pattern head :any env) (type-pattern tail :any env) :any}]
+    [{:call ctor-name args}
+      {:pattern ctor-name (lists/map (fn [a] (type-pattern a :any env)) args) expr-type}]
+    [{:atom a}
+      {:lit :atom a}]
+    [n (if (erlang/is_integer n) {:lit :int n} pattern)]
+    [_ pattern]))
+
+; --- Pipeline operator for readability ---
+
+(defn -> [x f]
+  (f x))

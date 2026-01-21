@@ -1,0 +1,203 @@
+; Vaisto Type Checker - Inference Context
+; Tracks type inference state: fresh variables, substitutions, environment
+;
+; This module implements Algorithm W style inference context:
+; - Fresh type variable generation
+; - Substitution accumulation
+; - Environment extension for let-polymorphism
+
+(ns Vaisto.TypeChecker.Context)
+
+(import Vaisto.TypeChecker.Core)
+(import Vaisto.TypeChecker.Unify)
+
+; Erlang FFI
+(extern maps/get [:any :any :any] :any)
+(extern maps/put [:any :any :any] :any)
+(extern maps/merge [(List :any)] :any)
+(extern maps/new [] :any)
+(extern maps/keys [:any] (List :any))
+(extern maps/fold [:any :any :any] :any)
+(extern sets/new [] :any)
+(extern sets/from_list [(List :any)] :any)
+(extern sets/subtract [:any :any] :any)
+(extern sets/union [:any :any] :any)
+(extern sets/to_list [:any] (List :any))
+(extern lists/zip [(List :any) (List :any)] (List :any))
+(extern lists/map [:any (List :any)] (List :any))
+(extern erlang/length [(List :any)] :int)
+
+; --- Context Record ---
+; Represents the mutable state during type inference
+;
+; Fields:
+;   counter     - Next fresh type variable ID
+;   row-counter - Next fresh row variable ID
+;   subst       - Current substitution map
+;   env         - Type environment (var -> type/scheme)
+
+(deftype Context [counter :int row-counter :int subst :any env :any])
+
+; --- Context Creation ---
+
+(defn new-context [env]
+  (Context 0 0 (Vaisto.TypeChecker.Core/empty-subst) env))
+
+(defn new-context-with-primitives []
+  (new-context (primitives-env)))
+
+; --- Primitive Environment ---
+; Built-in operators with their types
+
+(defn primitives-env []
+  (maps/from_list
+    (list
+      ; Arithmetic
+      {:+ {:fn (list :int :int) :int}}
+      {:- {:fn (list :int :int) :int}}
+      {:* {:fn (list :int :int) :int}}
+      {:/ {:fn (list :int :int) :int}}
+      ; Comparison (polymorphic)
+      {:== {:forall (list 0) {:fn (list {:tvar 0} {:tvar 0}) :bool}}}
+      {:!= {:forall (list 0) {:fn (list {:tvar 0} {:tvar 0}) :bool}}}
+      {:< {:fn (list :int :int) :bool}}
+      {:> {:fn (list :int :int) :bool}}
+      {:<= {:fn (list :int :int) :bool}}
+      {:>= {:fn (list :int :int) :bool}})))
+
+; --- Fresh Variable Generation ---
+
+(defn fresh-var [ctx]
+  (let [id (. ctx :counter)
+        new-ctx (Context
+                  (+ id 1)
+                  (. ctx :row-counter)
+                  (. ctx :subst)
+                  (. ctx :env))]
+    {{:tvar id} new-ctx}))
+
+(defn fresh-vars [ctx n]
+  (fresh-vars-acc ctx n (list)))
+
+(defn fresh-vars-acc [ctx n acc]
+  (if (== n 0)
+    {(lists/reverse acc) ctx}
+    (let [{tvar new-ctx} (fresh-var ctx)]
+      (fresh-vars-acc new-ctx (- n 1) (cons tvar acc)))))
+
+(defn fresh-row-var [ctx]
+  (let [id (. ctx :row-counter)
+        new-ctx (Context
+                  (. ctx :counter)
+                  (+ id 1)
+                  (. ctx :subst)
+                  (. ctx :env))]
+    {{:rvar id} new-ctx}))
+
+; --- Environment Operations ---
+
+(defn lookup [ctx name]
+  (let [result (maps/get name (. ctx :env) :not-found)]
+    (match result
+      [:not-found (Err {:undefined name})]
+      [scheme (Ok scheme)])))
+
+(defn extend [ctx name scheme]
+  (Context
+    (. ctx :counter)
+    (. ctx :row-counter)
+    (. ctx :subst)
+    (maps/put name scheme (. ctx :env))))
+
+(defn extend-many [ctx bindings]
+  (match bindings
+    [[] ctx]
+    [[{name type} | rest]
+      (extend-many (extend ctx name type) rest)]))
+
+; --- Substitution Operations ---
+
+(defn add-subst [ctx new-subst]
+  (Context
+    (. ctx :counter)
+    (. ctx :row-counter)
+    (Vaisto.TypeChecker.Core/compose-subst (. ctx :subst) new-subst)
+    (. ctx :env)))
+
+(defn apply-ctx [ctx t]
+  (Vaisto.TypeChecker.Core/apply-subst (. ctx :subst) t))
+
+; --- Unification in Context ---
+
+(defn unify-types [ctx t1 t2]
+  (match (Vaisto.TypeChecker.Unify/unify t1 t2 (. ctx :subst) (. ctx :row-counter))
+    [(Ok result)
+      (Ok (Context
+            (. ctx :counter)
+            (. result :counter)
+            (. result :subst)
+            (. ctx :env)))]
+    [(Err e) (Err e)]))
+
+; --- Instantiation ---
+; Replaces quantified type variables with fresh ones
+
+(defn instantiate [ctx scheme]
+  (match scheme
+    [{:forall vars inner-type}
+      (let [{fresh-vars new-ctx} (fresh-vars ctx (erlang/length vars))
+            subst (make-subst-from-pairs (lists/zip vars fresh-vars))
+            instantiated (Vaisto.TypeChecker.Core/apply-subst subst inner-type)]
+        {instantiated new-ctx})]
+    ; Non-polymorphic type, return as-is
+    [_ {scheme ctx}]))
+
+(defn make-subst-from-pairs [pairs]
+  (maps/from_list
+    (lists/map
+      (fn [pair]
+        (match pair
+          [{var tvar} {var tvar}]))
+      pairs)))
+
+; --- Generalization ---
+; Creates a polymorphic type scheme by quantifying over free variables
+; not in the environment (let-polymorphism)
+
+(defn generalize [ctx t]
+  (let [applied-type (apply-ctx ctx t)
+        type-vars (Vaisto.TypeChecker.Core/free-vars applied-type)
+        env-vars (env-free-vars ctx)
+        quantified (sets/to_list (sets/subtract type-vars env-vars))]
+    (if (== (erlang/length quantified) 0)
+      applied-type
+      {:forall quantified applied-type})))
+
+(defn env-free-vars [ctx]
+  (maps/fold
+    (fn [_name type acc]
+      (let [applied (Vaisto.TypeChecker.Core/apply-subst (. ctx :subst) type)]
+        (match applied
+          [{:forall vars inner}
+            ; Exclude forall-bound variables
+            (let [inner-free (Vaisto.TypeChecker.Core/free-vars inner)
+                  bound (sets/from_list vars)]
+              (sets/union acc (sets/subtract inner-free bound)))]
+          [_
+            (sets/union acc (Vaisto.TypeChecker.Core/free-vars applied))])))
+    (sets/new)
+    (. ctx :env)))
+
+; --- Update Helpers ---
+
+(defn with-counter [ctx new-counter]
+  (Context new-counter (. ctx :row-counter) (. ctx :subst) (. ctx :env)))
+
+(defn with-row-counter [ctx new-row-counter]
+  (Context (. ctx :counter) new-row-counter (. ctx :subst) (. ctx :env)))
+
+(defn with-subst [ctx new-subst]
+  (Context (. ctx :counter) (. ctx :row-counter) new-subst (. ctx :env)))
+
+(defn with-env [ctx new-env]
+  (Context (. ctx :counter) (. ctx :row-counter) (. ctx :subst) new-env))

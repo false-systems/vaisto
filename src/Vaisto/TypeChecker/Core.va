@@ -1,0 +1,258 @@
+; Vaisto Type Checker - Core Operations
+; Substitution application, free variables, composition
+;
+; This module provides the fundamental operations for type inference:
+; - Applying substitutions to types
+; - Finding free type variables
+; - Composing substitutions
+
+(ns Vaisto.TypeChecker.Core)
+
+(import Std.State)
+
+; Erlang FFI
+(extern maps/get [:any :any :any] :any)
+(extern maps/put [:any :any :any] :any)
+(extern maps/merge [(List :any)] :any)
+(extern maps/new [] :any)
+(extern maps/fold [:any :any :any] :any)
+(extern maps/keys [:any] (List :any))
+(extern maps/is_key [:any :any] :bool)
+(extern sets/new [] :any)
+(extern sets/add_element [:any :any] :any)
+(extern sets/union [:any :any] :any)
+(extern sets/subtract [:any :any] :any)
+(extern sets/to_list [:any] (List :any))
+(extern sets/from_list [(List :any)] :any)
+(extern sets/is_element [:any :any] :bool)
+(extern lists/map [:any (List :any)] (List :any))
+(extern lists/foldl [:any :any (List :any)] :any)
+(extern lists/reverse [(List :any)] (List :any))
+
+; --- Empty Substitution ---
+
+(defn empty-subst []
+  (maps/new))
+
+; --- Apply Substitution to Type ---
+; Recursively replaces type variables with their mappings
+
+(defn apply-subst [subst t]
+  (match t
+    ; Type variable - look up in substitution
+    [{:tvar id}
+      (let [result (maps/get id subst :not-found)]
+        (match result
+          [:not-found t]  ; Not in subst, keep as-is
+          [found
+            ; Check for self-reference to avoid infinite loop
+            (if (== found t)
+              t
+              (apply-subst subst found))]))]
+
+    ; Row variable - look up with :row prefix
+    [{:rvar id}
+      (let [key {:row id}
+            result (maps/get key subst :not-found)]
+        (match result
+          [:not-found t]
+          [found
+            (if (== found t)
+              t
+              (apply-subst subst found))]))]
+
+    ; Function type - apply to args and return
+    [{:fn args ret}
+      {:fn (apply-subst-list subst args) (apply-subst subst ret)}]
+
+    ; List type - apply to element
+    [{:list elem}
+      {:list (apply-subst subst elem)}]
+
+    ; Record type - apply to field types
+    [{:record name fields}
+      {:record name (apply-subst-fields subst fields)}]
+
+    ; Sum type - apply to variant field types
+    [{:sum name variants}
+      {:sum name (apply-subst-variants subst variants)}]
+
+    ; Row type - apply to fields and tail
+    [{:row fields tail}
+      {:row (apply-subst-fields subst fields) (apply-subst subst tail)}]
+
+    ; Process type - apply to state type
+    [{:process state-type msgs}
+      {:process (apply-subst subst state-type) msgs}]
+
+    ; PID type - leave as-is (msgs are atoms)
+    [{:pid _ _} t]
+
+    ; Atom type - leave as-is
+    [{:atom _} t]
+
+    ; Primitive types - leave as-is
+    [:int t]
+    [:float t]
+    [:bool t]
+    [:string t]
+    [:any t]
+    [:unit t]
+    [:closed t]
+
+    ; Unknown - leave as-is
+    [_ t]))
+
+(defn apply-subst-list [subst types]
+  (lists/map (fn [t] (apply-subst subst t)) types))
+
+(defn apply-subst-fields [subst fields]
+  (lists/map
+    (fn [field]
+      (match field
+        [{name type} {name (apply-subst subst type)}]))
+    fields))
+
+(defn apply-subst-variants [subst variants]
+  (lists/map
+    (fn [variant]
+      (match variant
+        [{ctor types} {ctor (apply-subst-list subst types)}]))
+    variants))
+
+; --- Compose Substitutions ---
+; Composes s1 and s2: first apply s1, then s2
+; Result maps each key to s2(s1(key))
+
+(defn compose-subst [s1 s2]
+  ; Apply s1 to all values in s2, then merge
+  (let [s2-applied (maps/fold
+                     (fn [k v acc]
+                       (maps/put k (apply-subst s1 v) acc))
+                     (maps/new)
+                     s2)]
+    (maps/merge (list s1 s2-applied))))
+
+; --- Free Type Variables ---
+; Returns a set of type variable IDs that are free in a type
+
+(defn free-vars [t]
+  (match t
+    [{:tvar id} (sets/add_element id (sets/new))]
+
+    [{:rvar id} (sets/add_element {:row id} (sets/new))]
+
+    [{:fn args ret}
+      (lists/foldl
+        (fn [arg acc] (sets/union acc (free-vars arg)))
+        (free-vars ret)
+        args)]
+
+    [{:list elem} (free-vars elem)]
+
+    [{:record _name fields}
+      (lists/foldl
+        (fn [field acc]
+          (match field
+            [{_name type} (sets/union acc (free-vars type))]))
+        (sets/new)
+        fields)]
+
+    [{:sum _name variants}
+      (lists/foldl
+        (fn [variant acc]
+          (match variant
+            [{_ctor types}
+              (lists/foldl
+                (fn [t inner-acc] (sets/union inner-acc (free-vars t)))
+                acc
+                types)]))
+        (sets/new)
+        variants)]
+
+    [{:row fields tail}
+      (let [field-vars (lists/foldl
+                         (fn [field acc]
+                           (match field
+                             [{_name type} (sets/union acc (free-vars type))]))
+                         (sets/new)
+                         fields)]
+        (sets/union field-vars (free-vars tail)))]
+
+    [_ (sets/new)]))
+
+; --- Occurs Check ---
+; Checks if a type variable occurs in a type (prevents infinite types)
+
+(defn occurs? [id t]
+  (match t
+    [{:tvar tid} (== id tid)]
+
+    [{:fn args ret}
+      (if (occurs-in-list? id args)
+        true
+        (occurs? id ret))]
+
+    [{:list elem} (occurs? id elem)]
+
+    [{:record _name fields} (occurs-in-fields? id fields)]
+
+    [{:row fields tail}
+      (if (occurs-in-fields? id fields)
+        true
+        (occurs? id tail))]
+
+    [_ false]))
+
+(defn occurs-in-list? [id types]
+  (match types
+    [[] false]
+    [[t | rest]
+      (if (occurs? id t)
+        true
+        (occurs-in-list? id rest))]))
+
+(defn occurs-in-fields? [id fields]
+  (match fields
+    [[] false]
+    [[{_name type} | rest]
+      (if (occurs? id type)
+        true
+        (occurs-in-fields? id rest))]))
+
+; --- Row Occurs Check ---
+; Checks if a row variable occurs in a type
+
+(defn row-occurs? [id t]
+  (match t
+    [{:rvar rid} (== id rid)]
+
+    [{:row fields tail}
+      (if (row-occurs-in-fields? id fields)
+        true
+        (row-occurs? id tail))]
+
+    [{:fn args ret}
+      (if (row-occurs-in-list? id args)
+        true
+        (row-occurs? id ret))]
+
+    [{:list elem} (row-occurs? id elem)]
+
+    [_ false]))
+
+(defn row-occurs-in-list? [id types]
+  (match types
+    [[] false]
+    [[t | rest]
+      (if (row-occurs? id t)
+        true
+        (row-occurs-in-list? id rest))]))
+
+(defn row-occurs-in-fields? [id fields]
+  (match fields
+    [[] false]
+    [[{_name type} | rest]
+      (if (row-occurs? id type)
+        true
+        (row-occurs-in-fields? id rest))]))

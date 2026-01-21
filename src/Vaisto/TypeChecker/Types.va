@@ -1,0 +1,218 @@
+; Vaisto Type Checker - Type Representation
+; ADT definitions for the type system
+;
+; This module defines how types are represented internally.
+; Uses sum types (ADTs) for type-safe pattern matching.
+
+(ns Vaisto.TypeChecker.Types)
+
+(import Std.String)
+
+; Erlang FFI
+(extern erlang/iolist_to_binary [(List :any)] :string)
+(extern erlang/integer_to_binary [:int] :string)
+(extern erlang/atom_to_binary [:any] :string)
+(extern lists/append [(List :any) (List :any)] (List :any))
+
+; --- Type Variable ---
+; Fresh type variables for inference: t0, t1, t2, ...
+(defn tvar [id :int]
+  {:tvar id})
+
+; Row variable for row polymorphism: r0, r1, r2, ...
+(defn rvar [id :int]
+  {:rvar id})
+
+; --- Type Representation ---
+; Types are represented as tagged tuples (Erlang-style for interop)
+;
+; Primitive types: :int, :float, :bool, :string, :any, :unit
+; Atom type: {:atom :foo}
+; List type: {:list elem-type}
+; Function type: {:fn [arg-types] ret-type}
+; Record type: {:record Name [{:field-name type} ...]}
+; Sum type: {:sum Name [{:ctor-name [field-types]} ...]}
+; Type variable: {:tvar id}
+; Row variable: {:rvar id}
+; Row type: {:row [{:field type} ...] tail}
+;   tail is either {:rvar id} (open) or :closed
+; PID type: {:pid process-name accepted-messages}
+
+; --- Type Predicates ---
+
+(defn tvar? [t]
+  (match t
+    [{:tvar _} true]
+    [_ false]))
+
+(defn rvar? [t]
+  (match t
+    [{:rvar _} true]
+    [_ false]))
+
+(defn fn-type? [t]
+  (match t
+    [{:fn _ _} true]
+    [_ false]))
+
+(defn list-type? [t]
+  (match t
+    [{:list _} true]
+    [_ false]))
+
+(defn record-type? [t]
+  (match t
+    [{:record _ _} true]
+    [_ false]))
+
+(defn sum-type? [t]
+  (match t
+    [{:sum _ _} true]
+    [_ false]))
+
+(defn row-type? [t]
+  (match t
+    [{:row _ _} true]
+    [_ false]))
+
+; --- Type Constructors ---
+
+(defn make-fn-type [arg-types ret-type]
+  {:fn arg-types ret-type})
+
+(defn make-list-type [elem-type]
+  {:list elem-type})
+
+(defn make-record-type [name fields]
+  {:record name fields})
+
+(defn make-sum-type [name variants]
+  {:sum name variants})
+
+(defn make-row-type [fields tail]
+  {:row fields tail})
+
+(defn make-atom-type [a]
+  {:atom a})
+
+(defn make-pid-type [process-name accepted-msgs]
+  {:pid process-name accepted-msgs})
+
+; --- Type Accessors ---
+
+(defn fn-arg-types [t]
+  (match t
+    [{:fn args _} args]
+    [_ (list)]))
+
+(defn fn-ret-type [t]
+  (match t
+    [{:fn _ ret} ret]
+    [_ :any]))
+
+(defn list-elem-type [t]
+  (match t
+    [{:list elem} elem]
+    [_ :any]))
+
+(defn record-name [t]
+  (match t
+    [{:record name _} name]
+    [_ :unknown]))
+
+(defn record-fields [t]
+  (match t
+    [{:record _ fields} fields]
+    [_ (list)]))
+
+(defn sum-name [t]
+  (match t
+    [{:sum name _} name]
+    [_ :unknown]))
+
+(defn sum-variants [t]
+  (match t
+    [{:sum _ variants} variants]
+    [_ (list)]))
+
+(defn row-fields [t]
+  (match t
+    [{:row fields _} fields]
+    [_ (list)]))
+
+(defn row-tail [t]
+  (match t
+    [{:row _ tail} tail]
+    [_ :closed]))
+
+(defn tvar-id [t]
+  (match t
+    [{:tvar id} id]
+    [_ -1]))
+
+(defn rvar-id [t]
+  (match t
+    [{:rvar id} id]
+    [_ -1]))
+
+; --- Type Formatting (for error messages) ---
+
+(defn format-type [t]
+  (match t
+    [:int "Int"]
+    [:float "Float"]
+    [:bool "Bool"]
+    [:string "String"]
+    [:any "Any"]
+    [:unit "Unit"]
+    [:ok "Ok"]
+    [{:tvar id} (erlang/iolist_to_binary (list "t" (erlang/integer_to_binary id)))]
+    [{:rvar id} (erlang/iolist_to_binary (list "r" (erlang/integer_to_binary id)))]
+    [{:atom a} (erlang/iolist_to_binary (list ":" (erlang/atom_to_binary a)))]
+    [{:list elem} (erlang/iolist_to_binary (list "List(" (format-type elem) ")"))]
+    [{:pid name _} (erlang/iolist_to_binary (list "Pid(" (erlang/atom_to_binary name) ")"))]
+    [{:record name _} (erlang/atom_to_binary name)]
+    [{:sum name _} (erlang/atom_to_binary name)]
+    [{:fn args ret} (format-fn-type args ret)]
+    [{:row fields :closed} (format-closed-row fields)]
+    [{:row fields tail} (format-open-row fields tail)]
+    [_ "<unknown>"]))
+
+(defn format-fn-type [args ret]
+  (erlang/iolist_to_binary
+    (list "(" (format-type-list args) ") -> " (format-type ret))))
+
+(defn format-type-list [types]
+  (format-type-list-acc types (list)))
+
+(defn format-type-list-acc [types acc]
+  (match types
+    [[] (join-with-comma (lists/reverse acc))]
+    [[t | rest]
+      (format-type-list-acc rest (cons (format-type t) acc))]))
+
+(defn join-with-comma [strs]
+  (match strs
+    [[] ""]
+    [[s] s]
+    [[s | rest]
+      (erlang/iolist_to_binary (list s ", " (join-with-comma rest)))]))
+
+(defn format-closed-row [fields]
+  (erlang/iolist_to_binary
+    (list "{" (format-field-list fields) "}")))
+
+(defn format-open-row [fields tail]
+  (erlang/iolist_to_binary
+    (list "{" (format-field-list fields) " | " (format-type tail) "}")))
+
+(defn format-field-list [fields]
+  (format-field-list-acc fields (list)))
+
+(defn format-field-list-acc [fields acc]
+  (match fields
+    [[] (join-with-comma (lists/reverse acc))]
+    [[{name type} | rest]
+      (let [formatted (erlang/iolist_to_binary
+                        (list (erlang/atom_to_binary name) ": " (format-type type)))]
+        (format-field-list-acc rest (cons formatted acc)))]))

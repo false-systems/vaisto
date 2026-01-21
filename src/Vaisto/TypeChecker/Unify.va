@@ -1,0 +1,321 @@
+; Vaisto Type Checker - Unification Algorithm
+; Hindley-Milner unification with row polymorphism
+;
+; Unification finds a substitution that makes two types equal.
+; For example, unifying {:tvar 0} with :int produces {0 => :int}.
+
+(ns Vaisto.TypeChecker.Unify)
+
+(import Vaisto.TypeChecker.Core)
+(import Vaisto.TypeChecker.Types)
+
+; Erlang FFI
+(extern maps/get [:any :any :any] :any)
+(extern maps/put [:any :any :any] :any)
+(extern maps/keys [:any] (List :any))
+(extern maps/new [] :any)
+(extern maps/size [:any] :int)
+(extern maps/from_list [(List :any)] :any)
+(extern maps/to_list [:any] (List :any))
+(extern sets/new [] :any)
+(extern sets/from_list [(List :any)] :any)
+(extern sets/to_list [:any] (List :any))
+(extern sets/intersection [:any :any] :any)
+(extern sets/subtract [:any :any] :any)
+(extern lists/keyfind [:any :int (List :any)] :any)
+(extern lists/sort [(List :any)] (List :any))
+(extern erlang/length [(List :any)] :int)
+
+; --- Main Unification Entry Point ---
+; Returns (Ok {subst row-counter}) or (Err reason)
+
+(defn unify [t1 t2 subst row-counter]
+  ; Apply current substitutions first
+  (let [t1-applied (Vaisto.TypeChecker.Core/apply-subst subst t1)
+        t2-applied (Vaisto.TypeChecker.Core/apply-subst subst t2)]
+    (unify-applied t1-applied t2-applied subst row-counter)))
+
+(defn unify-applied [t1 t2 subst row-counter]
+  (cond
+    ; Same type - nothing to do
+    [(== t1 t2) (Ok {:subst subst :counter row-counter})]
+
+    ; Type variable on left - bind it
+    [(tvar? t1) (bind-var t1 t2 subst row-counter)]
+
+    ; Type variable on right - bind it
+    [(tvar? t2) (bind-var t2 t1 subst row-counter)]
+
+    ; List types - unify element types
+    [(list-types? t1 t2) (unify-lists t1 t2 subst row-counter)]
+
+    ; Function types - unify args and return
+    [(fn-types? t1 t2) (unify-fns t1 t2 subst row-counter)]
+
+    ; Record types - unify field types
+    [(record-types? t1 t2) (unify-records t1 t2 subst row-counter)]
+
+    ; Row variable on left - bind it
+    [(rvar? t1) (bind-row-var t1 t2 subst row-counter)]
+
+    ; Row variable on right - bind it
+    [(rvar? t2) (bind-row-var t2 t1 subst row-counter)]
+
+    ; Row types - unify with row polymorphism
+    [(row-types? t1 t2) (unify-rows t1 t2 subst row-counter)]
+
+    ; Row type vs closed record
+    [(row-record? t1 t2) (unify-row-with-record t1 t2 subst row-counter)]
+    [(row-record? t2 t1) (unify-row-with-record t2 t1 subst row-counter)]
+
+    ; :any unifies with anything
+    [(== t1 :any) (Ok {:subst subst :counter row-counter})]
+    [(== t2 :any) (Ok {:subst subst :counter row-counter})]
+
+    ; No match - types are incompatible
+    [:else (Err {:cannot-unify t1 t2})]))
+
+; --- Type Predicates for Unification ---
+
+(defn tvar? [t]
+  (match t
+    [{:tvar _} true]
+    [_ false]))
+
+(defn rvar? [t]
+  (match t
+    [{:rvar _} true]
+    [_ false]))
+
+(defn list-types? [t1 t2]
+  (match {t1 t2}
+    [{{:list _} {:list _}} true]
+    [_ false]))
+
+(defn fn-types? [t1 t2]
+  (match {t1 t2}
+    [{{:fn _ _} {:fn _ _}} true]
+    [_ false]))
+
+(defn record-types? [t1 t2]
+  (match {t1 t2}
+    [{{:record _ _} {:record _ _}} true]
+    [_ false]))
+
+(defn row-types? [t1 t2]
+  (match {t1 t2}
+    [{{:row _ _} {:row _ _}} true]
+    [_ false]))
+
+(defn row-record? [t1 t2]
+  (match {t1 t2}
+    [{{:row _ _} {:record _ _}} true]
+    [_ false]))
+
+; --- Variable Binding ---
+
+(defn bind-var [tvar t subst row-counter]
+  (match tvar
+    [{:tvar id}
+      ; Occurs check
+      (if (Vaisto.TypeChecker.Core/occurs? id t)
+        (Err {:infinite-type id t})
+        (Ok {:subst (maps/put id t subst) :counter row-counter}))]))
+
+(defn bind-row-var [rvar t subst row-counter]
+  (match rvar
+    [{:rvar id}
+      ; Occurs check for row variables
+      (if (Vaisto.TypeChecker.Core/row-occurs? id t)
+        (Err {:infinite-row-type id t})
+        (Ok {:subst (maps/put {:row id} t subst) :counter row-counter}))]))
+
+; --- List Unification ---
+
+(defn unify-lists [t1 t2 subst row-counter]
+  (match {t1 t2}
+    [{{:list elem1} {:list elem2}}
+      (unify elem1 elem2 subst row-counter)]))
+
+; --- Function Unification ---
+
+(defn unify-fns [t1 t2 subst row-counter]
+  (match {t1 t2}
+    [{{:fn args1 ret1} {:fn args2 ret2}}
+      (if (!= (erlang/length args1) (erlang/length args2))
+        (Err {:arity-mismatch (erlang/length args1) (erlang/length args2)})
+        ; Unify arg types, then return type
+        (match (unify-type-lists args1 args2 subst row-counter)
+          [(Ok result)
+            (unify ret1 ret2 (. result :subst) (. result :counter))]
+          [(Err e) (Err e)]))]))
+
+(defn unify-type-lists [types1 types2 subst row-counter]
+  (match {types1 types2}
+    [{[] []} (Ok {:subst subst :counter row-counter})]
+    [{[t1 | rest1] [t2 | rest2]}
+      (match (unify t1 t2 subst row-counter)
+        [(Ok result)
+          (unify-type-lists rest1 rest2 (. result :subst) (. result :counter))]
+        [(Err e) (Err e)])]))
+
+; --- Record Unification ---
+
+(defn unify-records [t1 t2 subst row-counter]
+  (match {t1 t2}
+    [{{:record name1 fields1} {:record name2 fields2}}
+      (if (!= name1 name2)
+        (Err {:record-name-mismatch name1 name2})
+        (unify-record-fields fields1 fields2 subst row-counter))]))
+
+(defn unify-record-fields [fields1 fields2 subst row-counter]
+  (let [map1 (maps/from_list fields1)
+        map2 (maps/from_list fields2)
+        keys1 (lists/sort (maps/keys map1))
+        keys2 (lists/sort (maps/keys map2))]
+    (if (!= keys1 keys2)
+      (Err {:record-field-mismatch keys1 keys2})
+      (unify-field-types keys1 map1 map2 subst row-counter))))
+
+(defn unify-field-types [keys map1 map2 subst row-counter]
+  (match keys
+    [[] (Ok {:subst subst :counter row-counter})]
+    [[k | rest]
+      (let [t1 (maps/get k map1 :any)
+            t2 (maps/get k map2 :any)]
+        (match (unify t1 t2 subst row-counter)
+          [(Ok result)
+            (unify-field-types rest map1 map2 (. result :subst) (. result :counter))]
+          [(Err e) (Err e)]))]))
+
+; --- Row Unification (Row Polymorphism) ---
+
+(defn unify-rows [t1 t2 subst row-counter]
+  (match {t1 t2}
+    [{{:row fields1 tail1} {:row fields2 tail2}}
+      (let [map1 (maps/from_list fields1)
+            map2 (maps/from_list fields2)
+            keys1 (sets/from_list (maps/keys map1))
+            keys2 (sets/from_list (maps/keys map2))
+            common (sets/intersection keys1 keys2)
+            only-in-1 (maps/from_list (filter-fields fields1 (sets/to_list (sets/subtract keys1 common))))
+            only-in-2 (maps/from_list (filter-fields fields2 (sets/to_list (sets/subtract keys2 common))))]
+        ; Unify common fields
+        (match (unify-common-fields (sets/to_list common) map1 map2 subst row-counter)
+          [(Ok result)
+            (unify-row-tails only-in-1 tail1 only-in-2 tail2 (. result :subst) (. result :counter))]
+          [(Err e) (Err e)]))]))
+
+(defn filter-fields [fields keys]
+  (match fields
+    [[] (list)]
+    [[{name type} | rest]
+      (if (member? name keys)
+        (cons {name type} (filter-fields rest keys))
+        (filter-fields rest keys))]))
+
+(defn member? [elem lst]
+  (match lst
+    [[] false]
+    [[h | t] (if (== elem h) true (member? elem t))]))
+
+(defn unify-common-fields [keys map1 map2 subst row-counter]
+  (match keys
+    [[] (Ok {:subst subst :counter row-counter})]
+    [[k | rest]
+      (let [t1 (maps/get k map1 :any)
+            t2 (maps/get k map2 :any)]
+        (match (unify t1 t2 subst row-counter)
+          [(Ok result)
+            (unify-common-fields rest map1 map2 (. result :subst) (. result :counter))]
+          [(Err e) (Err e)]))]))
+
+(defn unify-row-tails [only1 tail1 only2 tail2 subst row-counter]
+  (cond
+    ; Both closed - extra fields not allowed
+    [(both-closed? tail1 tail2)
+      (if (both-empty? only1 only2)
+        (Ok {:subst subst :counter row-counter})
+        (Err {:row-field-mismatch-closed}))]
+
+    ; tail1 is open, tail2 is closed
+    [(open-closed? tail1 tail2)
+      (if (empty-map? only1)
+        (bind-row-var tail1 {:row (maps/to_list only2) :closed} subst row-counter)
+        (Err {:row-field-mismatch-open-closed (maps/keys only1)}))]
+
+    ; tail1 is closed, tail2 is open
+    [(open-closed? tail2 tail1)
+      (if (empty-map? only2)
+        (bind-row-var tail2 {:row (maps/to_list only1) :closed} subst row-counter)
+        (Err {:row-field-mismatch-closed-open (maps/keys only2)}))]
+
+    ; Both open - generate fresh row variable
+    [:else
+      (let [fresh-tail {:rvar row-counter}
+            new-counter (+ row-counter 1)]
+        (match (bind-row-var tail1 {:row (maps/to_list only2) fresh-tail} subst new-counter)
+          [(Ok result1)
+            (bind-row-var tail2 {:row (maps/to_list only1) fresh-tail} (. result1 :subst) (. result1 :counter))]
+          [(Err e) (Err e)]))]))
+
+(defn both-closed? [t1 t2]
+  (match {t1 t2}
+    [{:closed :closed} true]
+    [_ false]))
+
+(defn both-empty? [m1 m2]
+  (match {(maps/size m1) (maps/size m2)}
+    [{0 0} true]
+    [_ false]))
+
+(defn empty-map? [m]
+  (== (maps/size m) 0))
+
+(defn open-closed? [t1 t2]
+  (match {t1 t2}
+    [{{:rvar _} :closed} true]
+    [_ false]))
+
+; --- Row vs Record Unification ---
+
+(defn unify-row-with-record [row record subst row-counter]
+  (match {row record}
+    [{{:row row-fields row-tail} {:record _name record-fields}}
+      (let [row-map (maps/from_list row-fields)
+            record-map (maps/from_list record-fields)
+            row-keys (maps/keys row-map)
+            record-keys (maps/keys record-map)]
+        ; All row fields must exist in record
+        (if (not (all-in? row-keys record-keys))
+          (Err {:row-missing-fields (diff row-keys record-keys)})
+          ; Unify common fields
+          (match (unify-common-fields row-keys row-map record-map subst row-counter)
+            [(Ok result)
+              ; Extra record fields go into row tail
+              (let [extra (diff record-keys row-keys)
+                    extra-fields (filter-fields record-fields extra)]
+                (match row-tail
+                  [:closed
+                    (if (== (erlang/length extra) 0)
+                      (Ok result)
+                      (Err {:closed-row-extra-fields extra}))]
+                  [{:rvar _}
+                    (bind-row-var row-tail {:row extra-fields :closed} (. result :subst) (. result :counter))]))]
+            [(Err e) (Err e)])))]))
+
+(defn all-in? [keys target-keys]
+  (match keys
+    [[] true]
+    [[k | rest]
+      (if (member? k target-keys)
+        (all-in? rest target-keys)
+        false)]))
+
+(defn diff [keys1 keys2]
+  (match keys1
+    [[] (list)]
+    [[k | rest]
+      (if (member? k keys2)
+        (diff rest keys2)
+        (cons k (diff rest keys2)))]))

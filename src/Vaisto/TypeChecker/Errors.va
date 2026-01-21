@@ -1,0 +1,223 @@
+; Vaisto Type Checker - Error Constructors
+; Creates structured error values for type checking failures
+;
+; All errors include enough information for helpful diagnostics:
+; - Error message
+; - Expected vs actual types
+; - Hints for fixing
+
+(ns Vaisto.TypeChecker.Errors)
+
+(import Vaisto.TypeChecker.Types)
+
+; Erlang FFI
+(extern erlang/iolist_to_binary [(List :any)] :string)
+(extern erlang/atom_to_binary [:any] :string)
+(extern erlang/integer_to_binary [:int] :string)
+(extern lists/map [:any (List :any)] (List :any))
+
+; --- Error Record ---
+; Structured error with all diagnostic info
+
+(deftype TypeError
+  [message :string
+   expected :any
+   actual :any
+   note :any
+   hint :any
+   loc :any])
+
+(defn make-error [message]
+  (TypeError message :none :none :none :none :none))
+
+(defn with-expected [err expected]
+  (TypeError
+    (. err :message)
+    expected
+    (. err :actual)
+    (. err :note)
+    (. err :hint)
+    (. err :loc)))
+
+(defn with-actual [err actual]
+  (TypeError
+    (. err :message)
+    (. err :expected)
+    actual
+    (. err :note)
+    (. err :hint)
+    (. err :loc)))
+
+(defn with-note [err note]
+  (TypeError
+    (. err :message)
+    (. err :expected)
+    (. err :actual)
+    note
+    (. err :hint)
+    (. err :loc)))
+
+(defn with-hint [err hint]
+  (TypeError
+    (. err :message)
+    (. err :expected)
+    (. err :actual)
+    (. err :note)
+    hint
+    (. err :loc)))
+
+(defn with-loc [err loc]
+  (TypeError
+    (. err :message)
+    (. err :expected)
+    (. err :actual)
+    (. err :note)
+    (. err :hint)
+    loc))
+
+; --- Type Mismatch Errors ---
+
+(defn type-mismatch [expected actual]
+  (-> (make-error "type mismatch")
+      (with-expected expected)
+      (with-actual actual)))
+
+(defn list-type-mismatch [expected actual]
+  (-> (make-error "list elements must have the same type")
+      (with-expected expected)
+      (with-actual actual)))
+
+(defn branch-type-mismatch [branch1 branch2]
+  (-> (make-error "branch types must match")
+      (with-expected branch1)
+      (with-actual branch2)
+      (with-note "all branches of a conditional must return the same type")))
+
+(defn return-type-mismatch [declared inferred]
+  (-> (make-error "return type mismatch")
+      (with-expected declared)
+      (with-actual inferred)
+      (with-hint "the function body returns a different type than declared")))
+
+; --- Arity Errors ---
+
+(defn arity-mismatch [func-name expected actual]
+  (-> (make-error "wrong number of arguments")
+      (with-note (erlang/iolist_to_binary
+                   (list "`" (erlang/atom_to_binary func-name) "` takes "
+                         (erlang/integer_to_binary expected) " argument(s), but "
+                         (erlang/integer_to_binary actual) " were provided")))))
+
+(defn mapper-arity [operation expected actual]
+  (-> (make-error (erlang/iolist_to_binary
+                    (list (erlang/atom_to_binary operation) " function has wrong arity")))
+      (with-note (erlang/iolist_to_binary
+                   (list "`" (erlang/atom_to_binary operation) "` function must take exactly "
+                         (erlang/integer_to_binary expected) " argument(s), got "
+                         (erlang/integer_to_binary actual))))))
+
+; --- List Operation Errors ---
+
+(defn cons-type-mismatch [elem-type list-type]
+  (-> (make-error "cons type mismatch")
+      (with-expected list-type)
+      (with-actual elem-type)
+      (with-hint "element type must match list element type")))
+
+(defn not-a-list [operation actual]
+  (-> (make-error "expected a list")
+      (with-expected {:list :any})
+      (with-actual actual)
+      (with-note (erlang/iolist_to_binary
+                   (list "`" (erlang/atom_to_binary operation) "` operates on lists")))))
+
+(defn not-a-function [operation actual]
+  (-> (make-error "expected a function")
+      (with-expected {:fn (list :any) :any})
+      (with-actual actual)
+      (with-note (erlang/iolist_to_binary
+                   (list "`" (erlang/atom_to_binary operation) "` requires a function argument")))))
+
+(defn predicate-not-bool [actual]
+  (-> (make-error "predicate must return Bool")
+      (with-expected :bool)
+      (with-actual actual)
+      (with-hint "filter predicates must return true or false")))
+
+; --- Name Resolution Errors ---
+
+(defn undefined-variable [name]
+  (-> (make-error "undefined variable")
+      (with-note (erlang/iolist_to_binary
+                   (list "`" (erlang/atom_to_binary name) "` is not defined in this scope")))))
+
+(defn unknown-function [name]
+  (-> (make-error "unknown function")
+      (with-note (erlang/iolist_to_binary
+                   (list "`" (erlang/atom_to_binary name) "` is not defined")))))
+
+(defn unknown-type [name]
+  (-> (make-error "unknown type")
+      (with-note (erlang/iolist_to_binary
+                   (list "type `" (erlang/atom_to_binary name) "` is not defined")))))
+
+(defn unknown-process [name]
+  (-> (make-error "unknown process")
+      (with-note (erlang/iolist_to_binary
+                   (list "process `" (erlang/atom_to_binary name) "` is not defined in this module")))))
+
+; --- Process/Concurrency Errors ---
+
+(defn invalid-message [process-name message accepted]
+  (let [accepted-str (format-accepted-messages accepted)]
+    (-> (make-error "invalid message type")
+        (with-note (erlang/iolist_to_binary
+                     (list "process `" (erlang/atom_to_binary process-name)
+                           "` does not accept `:" (erlang/atom_to_binary message) "`")))
+        (with-hint (erlang/iolist_to_binary
+                     (list "accepted messages: " accepted-str))))))
+
+(defn format-accepted-messages [accepted]
+  (erlang/iolist_to_binary
+    (intersperse ", "
+      (lists/map (fn [msg] (erlang/iolist_to_binary (list ":" (erlang/atom_to_binary msg)))) accepted))))
+
+(defn intersperse [sep lst]
+  (match lst
+    [[] (list)]
+    [[x] (list x)]
+    [[x | rest] (cons x (cons sep (intersperse sep rest)))]))
+
+(defn send-to-non-pid [actual]
+  (-> (make-error "cannot send to non-pid")
+      (with-actual actual)
+      (with-note "the `!` operator requires a PID as the first argument")))
+
+; --- Unification Errors ---
+
+(defn infinite-type [tvar-id t]
+  (-> (make-error "infinite type")
+      (with-note (erlang/iolist_to_binary
+                   (list "t" (erlang/integer_to_binary tvar-id)
+                         " occurs in " (Vaisto.TypeChecker.Types/format-type t))))))
+
+(defn cannot-unify [t1 t2]
+  (-> (make-error "cannot unify types")
+      (with-expected t1)
+      (with-actual t2)))
+
+; --- Error Formatting ---
+
+(defn format-error [err]
+  (let [msg (. err :message)
+        expected (. err :expected)
+        actual (. err :actual)
+        note (. err :note)
+        hint (. err :hint)]
+    (erlang/iolist_to_binary
+      (list
+        "error: " msg
+        (if (== expected :none) "" (list "\n  expected: " (Vaisto.TypeChecker.Types/format-type expected)))
+        (if (== actual :none) "" (list "\n  actual: " (Vaisto.TypeChecker.Types/format-type actual)))
+        (if (== note :none) "" (list "\n  note: " note))
+        (if (== hint :none) "" (list "\n  hint: " hint))))))
