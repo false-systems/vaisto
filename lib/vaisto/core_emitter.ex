@@ -82,11 +82,32 @@ defmodule Vaisto.CoreEmitter do
       {:defn_multi, _, _, _, _} -> true  # 5 elements: name, arity, clauses, type
       {:defval, _, _, _} -> true   # Value bindings
       {:process, _, _, _, _} -> true # Process definition
-      {:deftype, _, _, _} -> true  # Skip deftypes (compile-time only)
+      {:deftype, _, _, _} -> true  # Keep deftypes for constructor generation
       {:extern, _, _, _} -> true   # Skip externs (compile-time only)
       {:ns, _} -> true             # Skip ns (compile-time only)
       {:import, _, _} -> true      # Skip import (compile-time only)
       _ -> false
+    end)
+
+    # Extract sum types to generate constructor functions
+    sum_types = Enum.filter(defns, fn
+      {:deftype, _name, {:sum, _variants}, _type} -> true
+      _ -> false
+    end)
+
+    # Generate constructor functions for each sum type variant
+    # E.g., (deftype Token (LParen loc)) → function LParen/1 that returns {:LParen, loc}
+    constructor_fns = Enum.flat_map(sum_types, fn {:deftype, _name, {:sum, variants}, _type} ->
+      Enum.map(variants, fn {ctor_name, arg_types} ->
+        arity = length(arg_types)
+        # Create parameter variables: __arg0__, __arg1__, etc.
+        param_vars = for i <- 0..(arity - 1), do: :cerl.c_var(:"__arg#{i}__")
+        # Body: tuple of constructor name and args: {:Ctor, arg0, arg1, ...}
+        body = :cerl.c_tuple([:cerl.c_atom(ctor_name) | param_vars])
+        fun = :cerl.c_fun(param_vars, body)
+        fname = :cerl.c_fname(ctor_name, arity)
+        {fname, fun}
+      end)
     end)
 
     # Filter out deftypes, keep only defns, defn_multi, defval, and process
@@ -170,14 +191,15 @@ defmodule Vaisto.CoreEmitter do
         {[main_name], [{main_name, main_fun}]}
     end
 
-    # Export all user-defined functions plus main
+    # Export all user-defined functions plus main plus constructor functions
     fun_exports = Enum.map(fun_defs, fn {fname, _} -> fname end)
+    ctor_exports = Enum.map(constructor_fns, fn {fname, _} -> fname end)
 
     :cerl.c_module(
       :cerl.c_atom(module_name),
-      fun_exports ++ main_exports,
+      fun_exports ++ main_exports ++ ctor_exports,
       [],
-      fun_defs ++ main_defs
+      fun_defs ++ main_defs ++ constructor_fns
     )
   end
 
@@ -471,7 +493,8 @@ defmodule Vaisto.CoreEmitter do
     erlang_op = case op do
       :== -> :"=:="
       :!= -> :"/="
-      _ -> op
+      :<= -> :"=<"   # Erlang uses =< for less-than-or-equal
+      _ -> op        # <, >, >= are same in Erlang
     end
 
     :cerl.c_call(

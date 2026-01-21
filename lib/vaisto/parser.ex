@@ -286,16 +286,26 @@ defmodule Vaisto.Parser do
     raise "Unclosed bracket at line #{open_loc.line}, column #{open_loc.col}"
   end
 
-  # Normalize bracket contents: detect cons pattern [h | t] → {:cons, h, t}
+  # Normalize bracket contents: detect cons pattern [a, b, ... | t] → nested cons
+  # [h | t] → {:cons, h, t}
+  # [a, b | t] → {:cons, a, {:cons, b, t}}
+  # [a, b, c | t] → {:cons, a, {:cons, b, {:cons, c, t}}}
   defp normalize_bracket_pattern(acc) do
-    case acc do
-      # Cons pattern: [h | t] where | is in the middle
-      [head, :|, tail] -> {:cons, head, tail}
-      # Empty list stays as empty list
-      [] -> []
-      # Regular list of elements (for let bindings, param lists, etc.)
-      _ -> acc
+    case find_pipe_index(acc) do
+      nil ->
+        # No pipe - empty list or regular list
+        acc
+      pipe_idx ->
+        # Split at pipe: elements before, tail after
+        {heads, [:|, tail]} = Enum.split(acc, pipe_idx)
+        # Build nested cons from right to left
+        List.foldr(heads, tail, fn head, rest -> {:cons, head, rest} end)
     end
+  end
+
+  # Find index of :| in list, or nil if not present
+  defp find_pipe_index(list) do
+    Enum.find_index(list, &(&1 == :|))
   end
 
   # Parse brace contents {...} - Erlang tuple literals and patterns
