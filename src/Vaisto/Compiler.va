@@ -1,0 +1,101 @@
+; Vaisto Self-Hosted Compiler
+; Wires together: Lexer → Parser → TypeChecker → CoreEmitter
+;
+; This is the entry point for the self-hosted compiler.
+; Given Vaisto source code, it produces BEAM bytecode.
+
+(ns Vaisto.Compiler)
+
+(import Vaisto.Lexer)
+(import Vaisto.Parser)
+(import Vaisto.TypeChecker)
+(import Vaisto.Compiler.CoreEmitter)
+
+; Erlang FFI
+(extern file/read_file [:string] :any)
+
+; --- Main Entry Point ---
+
+; Compile source code string to BEAM bytecode
+; Returns {:ok module-name binary} or {:error reason}
+(defn compile [source module-name]
+  (-> source
+      (lex module-name)
+      (parse-tokens)
+      (type-check)
+      (emit-core module-name)))
+
+; Compile and load into VM
+(defn compile-and-load [source module-name]
+  (match (compile source module-name)
+    [{:ok mod binary}
+      (do
+        (Vaisto.Compiler.CoreEmitter/compile-and-load binary mod)
+        {:ok mod})]
+    [error error]))
+
+; Compile a file
+(defn compile-file [path module-name]
+  (match (file/read_file path)
+    [{:ok content}
+      (compile content module-name)]
+    [{:error reason}
+      {:error {:file-read-error path reason}}]))
+
+; --- Pipeline Stages ---
+
+; Stage 1: Lexing
+; Lexer takes source string and filename, returns token list
+(defn lex [source filename]
+  (Vaisto.Lexer/tokenize source (atom-to-string filename)))
+
+; Stage 2: Parsing
+(defn parse-tokens [tokens]
+  (match tokens
+    [{:error reason} {:error reason}]
+    [toks (Vaisto.Parser/parse toks)]))
+
+; Stage 3: Type Checking
+(defn type-check [ast]
+  (match ast
+    [{:error reason} {:error reason}]
+    [forms (Vaisto.TypeChecker/check-module forms)]))
+
+; Stage 4: Core Erlang Emission
+(defn emit-core [typed-ast module-name]
+  (match typed-ast
+    [{:error reason} {:error reason}]
+    [ast (Vaisto.Compiler.CoreEmitter/compile ast module-name)]))
+
+; --- Utility Functions ---
+
+; Pretty-print compilation result
+(defn format-result [result]
+  (match result
+    [{:ok mod _binary}
+      {:ok mod}]
+    [{:error {:type-error expected actual loc}}
+      {:error (format-type-error expected actual loc)}]
+    [{:error {:unbound-variable name loc}}
+      {:error (format-unbound-error name loc)}]
+    [{:error reason}
+      {:error reason}]))
+
+(extern io_lib/format [:string (List :any)] (List :any))
+(extern erlang/iolist_to_binary [(List :any)] :string)
+
+(defn format-type-error [expected actual loc]
+  (erlang/iolist_to_binary
+    (io_lib/format "Type error at ~p: expected ~p, got ~p"
+                   (list loc expected actual))))
+
+(defn format-unbound-error [name loc]
+  (erlang/iolist_to_binary
+    (io_lib/format "Unbound variable '~p' at ~p" (list name loc))))
+
+; --- Helpers ---
+
+(extern erlang/atom_to_binary [:any :any] :string)
+(defn atom-to-string [a]
+  (erlang/atom_to_binary a :utf8))
+
