@@ -237,8 +237,9 @@ defmodule Vaisto.TypeSystem.InferTest do
       assert Core.format_type({:fn, [:int, :int], :int}) == "(Int, Int) -> Int"
     end
 
-    test "formats type variables" do
-      assert Core.format_type({:tvar, 0}) == "t0"
+    test "formats type variables with ML-style names" do
+      assert Core.format_type({:tvar, 0}) == "'a"
+      assert Core.format_type({:tvar, 1}) == "'b"
     end
 
     test "formats list types" do

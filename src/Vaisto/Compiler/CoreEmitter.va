@@ -73,11 +73,15 @@
 
 ; --- Main Entry Points ---
 
+; Compile options for compile:forms (typed as List :any to allow mixed atoms)
+(defn compile-opts [] (List :any)
+  (cons :from_core (cons :binary (cons :return_errors (list)))))
+
 ; Compile typed AST to BEAM bytecode
 ; Returns {:ok module-name binary} or {:error reason}
 (defn compile [typed-ast module-name]
   (let [core-ast (to-core typed-ast module-name)]
-    (match (compile/forms core-ast (list :from_core :binary :return_errors))
+    (match (compile/forms core-ast (compile-opts))
       [{:ok mod binary} {:ok mod binary}]
       [{:ok mod binary _warnings} {:ok mod binary}]
       [{:error errors _warnings} {:error (format-errors errors)}])))
@@ -718,7 +722,78 @@
 (defn integer-to-chars [n]
   (erlang/integer_to_list n))
 
+; --- Error Formatting ---
+; Format Erlang compiler errors into user-friendly messages
+; Erlang returns errors as: [{File, [{Line, Module, ErrorTerm}]}]
+
+(extern io_lib/format [:string (List :any)] (List :any))
+
 (defn format-errors [errors]
-  ; Simple error formatting for now
-  errors)
+  (erlang/iolist_to_binary
+    (lists/map format-error-group errors)))
+
+(defn format-error-group [error-group]
+  (match error-group
+    ; {File, [{Line, Module, ErrorTerm}, ...]}
+    [{file error-list}
+      (erlang/iolist_to_binary
+        (lists/map (fn [e] (format-single-error file e)) error-list))]
+    ; Just error list without file
+    [error-list
+      (if (list? error-list)
+        (erlang/iolist_to_binary (lists/map (fn [e] (format-single-error "unknown" e)) error-list))
+        (format-unknown-error error-list))]))
+
+(defn format-single-error [file err]
+  (match err
+    ; {Line, Module, ErrorTerm}
+    [{line mod term}
+      (let [msg (format-error-term mod term)]
+        (erlang/iolist_to_binary
+          (list "error: " msg "\n"
+                "  --> " (format-file file) ":" (erlang/integer_to_binary line) "\n")))]
+    ; Other format
+    [other (format-unknown-error other)]))
+
+(defn format-error-term [mod term]
+  ; Try to get human-readable message from the module
+  ; Most Erlang compiler modules have format_error/1
+  (match (safe-format-error mod term)
+    [{:ok msg} msg]
+    [:error (erlang/iolist_to_binary (list "compilation error: " (format-term term)))]))
+
+(extern erlang/apply [:any :any (List :any)] :any)
+(extern erlang/function_exported [:any :any :int] :bool)
+
+(defn safe-format-error [mod term]
+  ; Check if module exports format_error/1
+  (if (erlang/function_exported mod :format_error 1)
+    (let [result (erlang/apply mod :format_error (list term))]
+      {:ok (erlang/iolist_to_binary result)})
+    :error))
+
+(defn format-term [term]
+  ; Convert term to string representation
+  (erlang/iolist_to_binary (io_lib/format "~p" (list term))))
+
+(defn format-file [file]
+  (if (is-binary? file)
+    file
+    (if (list? file)
+      (erlang/list_to_binary file)
+      (erlang/atom_to_binary file))))
+
+(extern erlang/is_binary [:any] :bool)
+(defn is-binary? [x]
+  (erlang/is_binary x))
+
+(defn format-unknown-error [err]
+  (erlang/iolist_to_binary
+    (list "error: " (format-term err) "\n")))
+
+(defn list? [v]
+  (match v
+    [[] true]
+    [[_ | _] true]
+    [_ false]))
 

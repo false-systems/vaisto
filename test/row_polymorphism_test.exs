@@ -86,7 +86,8 @@ defmodule Vaisto.RowPolymorphismTest do
 
       assert formatted =~ "name:"
       assert formatted =~ "age:"
-      assert formatted =~ "r0"
+      # Row variables now use ..a, ..b style
+      assert formatted =~ "..a"
     end
 
     test "formats closed row type" do

@@ -105,9 +105,12 @@ defmodule Vaisto.TypeSystem.CoreTest do
       assert Core.format_type(:string) == "String"
     end
 
-    test "formats type variables" do
-      assert Core.format_type({:tvar, 0}) == "t0"
-      assert Core.format_type({:tvar, 42}) == "t42"
+    test "formats type variables with ML-style names" do
+      # Type variables now use 'a, 'b, ... style (ML/Rust tradition)
+      assert Core.format_type({:tvar, 0}) == "'a"
+      assert Core.format_type({:tvar, 1}) == "'b"
+      assert Core.format_type({:tvar, 25}) == "'z"
+      assert Core.format_type({:tvar, 26}) == "'a1"  # Wraps with suffix
     end
 
     test "formats function types" do
@@ -117,7 +120,7 @@ defmodule Vaisto.TypeSystem.CoreTest do
 
     test "formats list types" do
       assert Core.format_type({:list, :int}) == "List(Int)"
-      assert Core.format_type({:list, {:tvar, 0}}) == "List(t0)"
+      assert Core.format_type({:list, {:tvar, 0}}) == "List('a)"
     end
 
     test "formats atoms" do
