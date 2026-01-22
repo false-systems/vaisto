@@ -157,8 +157,17 @@
     [_ -1]))
 
 ; --- Type Formatting (for error messages) ---
+;
+; We use 'a, 'b, 'c style for type variables (ML/Rust tradition).
+; The key insight: raw IDs like {:tvar 452} are confusing.
+; We normalize them contextually so errors show 'a, 'b instead.
 
+; Simple format-type for backwards compatibility (uses raw IDs)
 (defn format-type [t]
+  (format-type-with-ctx t (maps/new)))
+
+; Format with a normalization context (id -> display-index mapping)
+(defn format-type-with-ctx [t ctx]
   (match t
     [:int "Int"]
     [:float "Float"]
@@ -167,30 +176,173 @@
     [:any "Any"]
     [:unit "Unit"]
     [:ok "Ok"]
-    [{:tvar id} (erlang/iolist_to_binary (list "t" (erlang/integer_to_binary id)))]
-    [{:rvar id} (erlang/iolist_to_binary (list "r" (erlang/integer_to_binary id)))]
+    [{:tvar id} (format-tvar-pretty (maps/get id ctx id))]
+    [{:rvar id} (format-rvar-pretty (maps/get {:row id} ctx id))]
     [{:atom a} (erlang/iolist_to_binary (list ":" (erlang/atom_to_binary a)))]
-    [{:list elem} (erlang/iolist_to_binary (list "List(" (format-type elem) ")"))]
+    [{:list elem} (erlang/iolist_to_binary (list "List(" (format-type-with-ctx elem ctx) ")"))]
     [{:pid name _} (erlang/iolist_to_binary (list "Pid(" (erlang/atom_to_binary name) ")"))]
     [{:record name _} (erlang/atom_to_binary name)]
     [{:sum name _} (erlang/atom_to_binary name)]
-    [{:fn args ret} (format-fn-type args ret)]
-    [{:row fields :closed} (format-closed-row fields)]
-    [{:row fields tail} (format-open-row fields tail)]
+    [{:fn args ret} (format-fn-type-ctx args ret ctx)]
+    [{:row fields :closed} (format-closed-row-ctx fields ctx)]
+    [{:row fields tail} (format-open-row-ctx fields tail ctx)]
     [_ "<unknown>"]))
 
-(defn format-fn-type [args ret]
+; Convert normalized index to 'a, 'b, ... 'z, 'a1, 'b1, ...
+(extern erlang/rem [:int :int] :int)
+(extern erlang/div [:int :int] :int)
+
+(defn format-tvar-pretty [idx]
+  (let [base (erlang/rem idx 26)
+        suffix-num (erlang/div idx 26)
+        ; 97 = ASCII 'a'
+        char-code (+ 97 base)
+        base-char (char-to-string char-code)]
+    (if (== suffix-num 0)
+      (erlang/iolist_to_binary (list "'" base-char))
+      (erlang/iolist_to_binary (list "'" base-char (erlang/integer_to_binary suffix-num))))))
+
+(defn format-rvar-pretty [idx]
+  (let [base (erlang/rem idx 26)
+        suffix-num (erlang/div idx 26)
+        char-code (+ 97 base)
+        base-char (char-to-string char-code)]
+    (if (== suffix-num 0)
+      (erlang/iolist_to_binary (list ".." base-char))
+      (erlang/iolist_to_binary (list ".." base-char (erlang/integer_to_binary suffix-num))))))
+
+(extern erlang/list_to_binary [(List :int)] :string)
+(defn char-to-string [code]
+  (erlang/list_to_binary (list code)))
+
+; --- Contextual Normalization ---
+; Scan types to build a mapping: raw-id -> display-index (0, 1, 2...)
+; This ensures errors show 'a, 'b instead of 't452, 't890
+
+(extern lists/sort [(List :any)] (List :any))
+(extern lists/usort [(List :any)] (List :any))
+(extern lists/foldl [:any :any (List :any)] :any)
+
+; Collect all type variable IDs from a type (in order of appearance)
+(defn collect-tvars [t]
+  (collect-tvars-acc t (list)))
+
+(defn collect-tvars-acc [t acc]
+  (match t
+    [{:tvar id} (cons {:tvar id} acc)]
+    [{:rvar id} (cons {:rvar id} acc)]
+    [{:list elem} (collect-tvars-acc elem acc)]
+    [{:fn args ret}
+      (let [args-collected (lists/foldl (fn [arg a] (collect-tvars-acc arg a)) acc args)]
+        (collect-tvars-acc ret args-collected))]
+    [{:row fields tail}
+      (let [fields-collected (lists/foldl
+                               (fn [{_ ftype} a] (collect-tvars-acc ftype a))
+                               acc
+                               fields)]
+        (collect-tvars-acc tail fields-collected))]
+    [{:record _ fields}
+      (lists/foldl (fn [{_ ftype} a] (collect-tvars-acc ftype a)) acc fields)]
+    [{:sum _ variants}
+      (lists/foldl
+        (fn [{_ field-types} a]
+          (lists/foldl (fn [ft a2] (collect-tvars-acc ft a2)) a field-types))
+        acc
+        variants)]
+    [_ acc]))
+
+; Build normalization context from multiple types (for error display)
+; Returns a map: raw-id -> normalized-index
+(defn build-display-ctx [types]
+  (let [; Collect all tvars from all types
+        all-vars (lists/foldl
+                   (fn [t acc] (lists/append (collect-tvars t) acc))
+                   (list)
+                   types)
+        ; Remove duplicates, keeping first occurrence order
+        unique-vars (unique-ordered (lists/reverse all-vars))]
+    ; Build map: var -> index
+    (build-var-map unique-vars 0 (maps/new))))
+
+(defn unique-ordered [lst]
+  (unique-ordered-acc lst (sets/new) (list)))
+
+(extern sets/new [] :any)
+(extern sets/is_element [:any :any] :bool)
+(extern sets/add_element [:any :any] :any)
+
+(defn unique-ordered-acc [lst seen acc]
+  (match lst
+    [[] (lists/reverse acc)]
+    [[v | rest]
+      (if (sets/is_element v seen)
+        (unique-ordered-acc rest seen acc)
+        (unique-ordered-acc rest (sets/add_element v seen) (cons v acc)))]))
+
+(defn build-var-map [vars idx acc]
+  (match vars
+    [[] acc]
+    [[{:tvar id} | rest]
+      (build-var-map rest (+ idx 1) (maps/put id idx acc))]
+    [[{:rvar id} | rest]
+      (build-var-map rest (+ idx 1) (maps/put {:row id} idx acc))]
+    [[_ | rest]
+      (build-var-map rest idx acc)]))
+
+; --- Main API for Error Formatting ---
+; Format types with automatic normalization (for error messages)
+
+(defn format-types-for-error [expected actual]
+  (let [ctx (build-display-ctx (list expected actual))]
+    {:expected (format-type-with-ctx expected ctx)
+     :actual (format-type-with-ctx actual ctx)}))
+
+; Format a single type in context of others
+(defn format-type-in-context [t context-types]
+  (let [ctx (build-display-ctx (cons t context-types))]
+    (format-type-with-ctx t ctx)))
+
+; --- Context-aware formatting helpers ---
+
+(defn format-fn-type-ctx [args ret ctx]
   (erlang/iolist_to_binary
-    (list "(" (format-type-list args) ") -> " (format-type ret))))
+    (list "(" (format-type-list-ctx args ctx) ") -> " (format-type-with-ctx ret ctx))))
 
-(defn format-type-list [types]
-  (format-type-list-acc types (list)))
+(defn format-type-list-ctx [types ctx]
+  (format-type-list-ctx-acc types ctx (list)))
 
-(defn format-type-list-acc [types acc]
+(defn format-type-list-ctx-acc [types ctx acc]
   (match types
     [[] (join-with-comma (lists/reverse acc))]
     [[t | rest]
-      (format-type-list-acc rest (cons (format-type t) acc))]))
+      (format-type-list-ctx-acc rest ctx (cons (format-type-with-ctx t ctx) acc))]))
+
+(defn format-closed-row-ctx [fields ctx]
+  (erlang/iolist_to_binary
+    (list "{" (format-field-list-ctx fields ctx) "}")))
+
+(defn format-open-row-ctx [fields tail ctx]
+  (erlang/iolist_to_binary
+    (list "{" (format-field-list-ctx fields ctx) " | " (format-type-with-ctx tail ctx) "}")))
+
+(defn format-field-list-ctx [fields ctx]
+  (format-field-list-ctx-acc fields ctx (list)))
+
+(defn format-field-list-ctx-acc [fields ctx acc]
+  (match fields
+    [[] (join-with-comma (lists/reverse acc))]
+    [[{name type} | rest]
+      (let [formatted (erlang/iolist_to_binary
+                        (list (erlang/atom_to_binary name) ": " (format-type-with-ctx type ctx)))]
+        (format-field-list-ctx-acc rest ctx (cons formatted acc)))]))
+
+; --- Legacy helpers (for backwards compat) ---
+
+(defn format-fn-type [args ret]
+  (format-fn-type-ctx args ret (maps/new)))
+
+(defn format-type-list [types]
+  (format-type-list-ctx types (maps/new)))
 
 (defn join-with-comma [strs]
   (match strs
@@ -200,20 +352,10 @@
       (erlang/iolist_to_binary (list s ", " (join-with-comma rest)))]))
 
 (defn format-closed-row [fields]
-  (erlang/iolist_to_binary
-    (list "{" (format-field-list fields) "}")))
+  (format-closed-row-ctx fields (maps/new)))
 
 (defn format-open-row [fields tail]
-  (erlang/iolist_to_binary
-    (list "{" (format-field-list fields) " | " (format-type tail) "}")))
+  (format-open-row-ctx fields tail (maps/new)))
 
 (defn format-field-list [fields]
-  (format-field-list-acc fields (list)))
-
-(defn format-field-list-acc [fields acc]
-  (match fields
-    [[] (join-with-comma (lists/reverse acc))]
-    [[{name type} | rest]
-      (let [formatted (erlang/iolist_to_binary
-                        (list (erlang/atom_to_binary name) ": " (format-type type)))]
-        (format-field-list-acc rest (cons formatted acc)))]))
+  (format-field-list-ctx fields (maps/new)))

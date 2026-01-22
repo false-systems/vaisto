@@ -30,6 +30,22 @@
 (extern erlang/tl [(List :any)] (List :any))
 (extern erlang/length [(List :any)] :int)
 (extern erlang/is_integer [:any] :bool)
+
+; Helper: put with map as first arg (for threading)
+(defn map-put [m k v]
+  (maps/put k v m))
+
+; Helper: get field from tuple-record {:key1 val1 :key2 val2}
+; Tuples are stored as {key1, val1, key2, val2, ...} in Erlang
+(extern erlang/tuple_to_list [:any] (List :any))
+(defn tuple-get [tuple key]
+  (tuple-get-list (erlang/tuple_to_list tuple) key))
+
+(defn tuple-get-list [lst key]
+  (match lst
+    [[] :not-found]
+    [[k v | rest]
+      (if (== k key) v (tuple-get-list rest key))]))
 (extern erlang/is_float [:any] :bool)
 (extern erlang/is_atom [:any] :bool)
 
@@ -44,30 +60,30 @@
   ; Dispatch based on expression type
   (match expr
     ; --- Literals ---
-    [n (if (erlang/is_integer n) (Ok {:type :int :ast {:lit :int n}}) (check-non-int expr env))]
+    [n (if (erlang/is_integer n) (Ok #{ :type :int :ast {:lit :int n}}) (check-non-int expr env))]
     [_ (check-non-int expr env)]))
 
 (defn check-non-int [expr env]
   (match expr
     ; Float literal
     [f (if (erlang/is_float f)
-         (Ok {:type :float :ast {:lit :float f}})
+         (Ok #{ :type :float :ast {:lit :float f}})
          (check-non-number expr env))]
     [_ (check-non-number expr env)]))
 
 (defn check-non-number [expr env]
   (cond
-    [(== expr true) (Ok {:type :bool :ast {:lit :bool true}})]
-    [(== expr false) (Ok {:type :bool :ast {:lit :bool false}})]
+    [(== expr true) (Ok #{ :type :bool :ast {:lit :bool true}})]
+    [(== expr false) (Ok #{ :type :bool :ast {:lit :bool false}})]
     [:else (check-structured expr env)]))
 
 (defn check-structured [expr env]
   (match expr
     ; String literal
-    [{:string s} (Ok {:type :string :ast {:lit :string s}})]
+    [{:string s} (Ok #{ :type :string :ast {:lit :string s}})]
 
     ; Atom literal
-    [{:atom a} (Ok {:type {:atom a} :ast {:lit :atom a}})]
+    [{:atom a} (Ok #{ :type {:atom a} :ast {:lit :atom a}})]
 
     ; Variable reference
     [{:var name} (check-var name env)]
@@ -80,14 +96,14 @@
 (defn check-atom-or-var [a env]
   (let [lookup (maps/get a env :not-found)]
     (match lookup
-      [:not-found (Ok {:type {:atom a} :ast {:lit :atom a}})]
-      [t (Ok {:type t :ast {:var a t}})])))
+      [:not-found (Ok #{ :type {:atom a} :ast {:lit :atom a}})]
+      [t (Ok #{ :type t :ast {:var a t}})])))
 
 (defn check-var [name env]
   (let [lookup (maps/get name env :not-found)]
     (match lookup
       [:not-found (Err (Vaisto.TypeChecker.Errors/undefined-variable name))]
-      [t (Ok {:type t :ast {:var name t}})])))
+      [t (Ok #{ :type t :ast {:var name t}})])))
 
 (defn check-compound [expr env]
   (match expr
@@ -95,7 +111,7 @@
     [{:list elements} (check-list elements env)]
 
     ; Empty bracket = empty list
-    [{:bracket []} (Ok {:type {:list :any} :ast {:list (list) {:list :any}}})]
+    [{:bracket []} (Ok #{ :type {:list :any} :ast {:list (list) {:list :any}}})]
 
     ; Non-empty bracket = list
     [{:bracket elements} (check-list elements env)]
@@ -106,41 +122,50 @@
     ; Map literal
     [{:map pairs} (check-map pairs env)]
 
-    ; Field access
+    ; Field access (with or without loc)
+    [{:field_access record field _loc} (check-field-access record field env)]
     [{:field_access record field} (check-field-access record field env)]
 
-    ; If expression
+    ; If expression (with or without loc)
+    [{:if cond then-b else-b _loc} (check-if cond then-b else-b env)]
     [{:if cond then-b else-b} (check-if cond then-b else-b env)]
 
-    ; Let binding
+    ; Let binding (with or without loc)
+    [{:let bindings body _loc} (check-let bindings body env)]
     [{:let bindings body} (check-let bindings body env)]
 
-    ; Match expression
+    ; Match expression (with or without loc)
+    [{:match expr clauses _loc} (check-match expr clauses env)]
     [{:match expr clauses} (check-match expr clauses env)]
 
-    ; Do block
+    ; Do block (with or without loc)
+    [{:do exprs _loc} (check-do exprs env)]
     [{:do exprs} (check-do exprs env)]
 
-    ; Anonymous function
+    ; Anonymous function (with or without loc)
+    [{:fn params body _loc} (check-fn params body env)]
     [{:fn params body} (check-fn params body env)]
 
-    ; Function call
+    ; Function call (with or without loc)
+    [{:call func args _loc} (check-call func args env)]
     [{:call func args} (check-call func args env)]
 
-    ; Function definition
+    ; Function definition (with or without loc)
+    [{:defn name params body ret-type _loc} (check-defn name params body ret-type env)]
     [{:defn name params body ret-type} (check-defn name params body ret-type env)]
 
-    ; Type definition
+    ; Type definition (with or without loc)
+    [{:deftype name fields _loc} (check-deftype name fields env)]
     [{:deftype name fields} (check-deftype name fields env)]
 
-    ; Extern declaration
+    ; Extern declaration (with or without loc) - externs have 4 fields: mod func arg-types ret-type
     [{:extern mod func arg-types ret-type} (check-extern mod func arg-types ret-type env)]
 
     ; Module namespace
-    [{:ns name} (Ok {:type :ns :ast {:ns name}})]
+    [{:ns name} (Ok #{ :type :ns :ast {:ns name}})]
 
-    ; Import
-    [{:import module alias} (Ok {:type :import :ast {:import module alias}})]
+    ; Import (with or without loc)
+    [{:import module alias} (Ok #{ :type :import :ast {:import module alias}})]
 
     ; Unknown
     [_ (Err (Vaisto.TypeChecker.Errors/make-error "unknown expression"))]))
@@ -149,14 +174,14 @@
 
 (defn check-list [elements env]
   (match elements
-    [[] (Ok {:type {:list :any} :ast {:list (list) {:list :any}}})]
+    [[] (Ok #{ :type {:list :any} :ast {:list (list) {:list :any}}})]
     [[first | rest]
       (match (check-expr first env)
         [(Ok first-result)
           (let [elem-type (. first-result :type)
                 first-ast (. first-result :ast)]
             (match (check-list-elements rest elem-type env (list first-ast))
-              [(Ok result) (Ok {:type {:list elem-type} :ast {:list (. result :asts) {:list elem-type}}})]
+              [(Ok result) (Ok #{ :type {:list elem-type} :ast {:list (. result :asts) {:list elem-type}}})]
               [(Err e) (Err e)]))]
         [(Err e) (Err e)])]))
 
@@ -177,7 +202,7 @@
   (match (check-args elements env)
     [(Ok result)
       ; Tuples are :any for Erlang interop flexibility
-      (Ok {:type :any :ast {:tuple (. result :asts) :any}})]
+      (Ok #{ :type :any :ast {:tuple (. result :asts) :any}})]
     [(Err e) (Err e)]))
 
 ; --- Map Literal ---
@@ -186,7 +211,7 @@
   (match (check-map-pairs pairs env (list) (list))
     [(Ok result)
       (let [row-type {:row (. result :fields) :closed}]
-        (Ok {:type row-type :ast {:map (. result :asts) row-type}}))]
+        (Ok #{ :type row-type :ast {:map (. result :asts) row-type}}))]
     [(Err e) (Err e)]))
 
 (defn check-map-pairs [pairs env fields-acc asts-acc]
@@ -217,7 +242,7 @@
       (let [record-type (. result :type)]
         (match (lookup-field record-type field)
           [(Ok field-type)
-            (Ok {:type field-type :ast {:field_access (. result :ast) field field-type}})]
+            (Ok #{ :type field-type :ast {:field_access (. result :ast) field field-type}})]
           [(Err e) (Err e)]))]
     [(Err e) (Err e)]))
 
@@ -246,7 +271,7 @@
             (match (check-expr else-expr env)
               [(Ok else-result)
                 (if (types-match? (. then-result :type) (. else-result :type))
-                  (Ok {:type (. then-result :type)
+                  (Ok #{ :type (. then-result :type)
                        :ast {:if (. cond-result :ast) (. then-result :ast) (. else-result :ast) (. then-result :type)}})
                   (Err (Vaisto.TypeChecker.Errors/branch-type-mismatch (. then-result :type) (. else-result :type))))]
               [(Err e) (Err e)])]
@@ -260,7 +285,7 @@
     [(Ok result)
       (match (check-expr body (. result :env))
         [(Ok body-result)
-          (Ok {:type (. body-result :type)
+          (Ok #{ :type (. body-result :type)
                :ast {:let (. result :typed-bindings) (. body-result :ast) (. body-result :type)}})]
         [(Err e) (Err e)])]
     [(Err e) (Err e)]))
@@ -283,7 +308,7 @@
     [(Ok expr-result)
       (match (check-match-clauses clauses (. expr-result :type) env)
         [(Ok clauses-result)
-          (Ok {:type (. clauses-result :type)
+          (Ok #{ :type (. clauses-result :type)
                :ast {:match (. expr-result :ast) (. clauses-result :clauses) (. clauses-result :type)}})]
         [(Err e) (Err e)])]
     [(Err e) (Err e)]))
@@ -295,7 +320,7 @@
       (match (check-match-clause pattern body expr-type env)
         [(Ok first-result)
           (match (check-remaining-clauses rest expr-type (. first-result :body-type) env (list (. first-result :clause)))
-            [(Ok clauses) (Ok {:type (. first-result :body-type) :clauses clauses})]
+            [(Ok clauses) (Ok #{ :type (. first-result :body-type) :clauses clauses})]
             [(Err e) (Err e)])]
         [(Err e) (Err e)])]))
 
@@ -324,7 +349,7 @@
 
 (defn check-do [exprs env]
   (match exprs
-    [[] (Ok {:type :unit :ast {:do (list) :unit}})]
+    [[] (Ok #{ :type :unit :ast {:do (list) :unit}})]
     [_ (check-do-exprs exprs env (list))]))
 
 (defn check-do-exprs [exprs env acc]
@@ -333,7 +358,7 @@
     [[last-expr]
       (match (check-expr last-expr env)
         [(Ok result)
-          (Ok {:type (. result :type)
+          (Ok #{ :type (. result :type)
                :ast {:do (lists/reverse (cons (. result :ast) acc)) (. result :type)}})]
         [(Err e) (Err e)])]
     [[expr | rest]
@@ -350,7 +375,7 @@
     (match (check-expr body extended-env)
       [(Ok body-result)
         (let [func-type {:fn param-types (. body-result :type)}]
-          (Ok {:type func-type
+          (Ok #{ :type func-type
                :ast {:fn params (. body-result :ast) func-type}}))]
       [(Err e) (Err e)])))
 
@@ -363,7 +388,7 @@
         [(Ok args-result)
           (match (unify-call func-type (. args-result :types))
             [(Ok ret-type)
-              (Ok {:type ret-type :ast {:call func (. args-result :asts) ret-type}})]
+              (Ok #{ :type ret-type :ast {:call func (. args-result :asts) ret-type}})]
             [(Err e) (Err e)])]
         [(Err e) (Err e)])]
     [(Err e) (Err e)]))
@@ -379,7 +404,7 @@
 
 (defn check-args-acc [args env types-acc asts-acc]
   (match args
-    [[] (Ok {:types (lists/reverse types-acc) :asts (lists/reverse asts-acc)})]
+    [[] (Ok #{ :types (lists/reverse types-acc) :asts (lists/reverse asts-acc)})]
     [[arg | rest]
       (match (check-expr arg env)
         [(Ok result)
@@ -411,18 +436,28 @@
 ; --- Function Definition ---
 
 (defn check-defn [name params body ret-type env]
-  (let [param-names (lists/map (fn [p] (match p [{n _} n])) params)
-        param-types (lists/map (fn [p] (match p [{_ t} t])) params)
+  (let [; Extract param names - handle both {name type} pairs and bare symbols
+        param-names (lists/map (fn [p]
+                                 (match p
+                                   [{n _} n]    ; {name type} pair
+                                   [n n]))      ; bare symbol
+                               params)
+        ; Extract param types - use :any for bare symbols
+        param-types (lists/map (fn [p]
+                                 (match p
+                                   [{_ t} t]    ; {name type} pair
+                                   [_ :any]))   ; bare symbol defaults to :any
+                               params)
         param-bindings (lists/zip param-names param-types)
         self-type {:fn param-types ret-type}
         extended-env (-> env
                         (extend-env-with-bindings param-bindings)
-                        (maps/put name self-type))]
+                        (map-put name self-type))]
     (match (check-expr body extended-env)
       [(Ok body-result)
         (if (types-match? ret-type (. body-result :type))
           (let [func-type {:fn param-types (. body-result :type)}]
-            (Ok {:type func-type
+            (Ok #{ :type func-type
                  :ast {:defn name param-names (. body-result :ast) func-type}}))
           (Err (Vaisto.TypeChecker.Errors/return-type-mismatch ret-type (. body-result :type))))]
       [(Err e) (Err e)])))
@@ -433,19 +468,19 @@
   (match fields
     [{:product fields}
       (let [record-type {:record name fields}]
-        (Ok {:type record-type :ast {:deftype name {:product fields} record-type}}))]
+        (Ok #{ :type record-type :ast {:deftype name {:product fields} record-type}}))]
     [{:sum variants}
       (let [sum-type {:sum name variants}]
-        (Ok {:type sum-type :ast {:deftype name {:sum variants} sum-type}}))]
+        (Ok #{ :type sum-type :ast {:deftype name {:sum variants} sum-type}}))]
     [_ ; Legacy: treat as product
       (let [record-type {:record name fields}]
-        (Ok {:type record-type :ast {:deftype name {:product fields} record-type}}))]))
+        (Ok #{ :type record-type :ast {:deftype name {:product fields} record-type}}))]))
 
 ; --- Extern Declaration ---
 
 (defn check-extern [mod func arg-types ret-type env]
   (let [func-type {:fn arg-types ret-type}]
-    (Ok {:type :extern :ast {:extern mod func func-type}})))
+    (Ok #{ :type :extern :ast {:extern mod func func-type}})))
 
 ; --- Module Checking (Two-Pass) ---
 
@@ -494,7 +529,7 @@
 
 (defn check-module-forms [forms env acc]
   (match forms
-    [[] (Ok {:type :module :ast {:module (lists/reverse acc)}})]
+    [[] (Ok #{ :type :module :ast {:module (lists/reverse acc)}})]
     [[form | rest]
       (match (check-expr form env)
         [(Ok result)

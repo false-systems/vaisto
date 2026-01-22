@@ -196,10 +196,15 @@
 ; --- Unification Errors ---
 
 (defn infinite-type [tvar-id t]
-  (-> (make-error "infinite type")
-      (with-note (erlang/iolist_to_binary
-                   (list "t" (erlang/integer_to_binary tvar-id)
-                         " occurs in " (Vaisto.TypeChecker.Types/format-type t))))))
+  ; Format with context so the tvar shows as 'a not t452
+  (let [tvar {:tvar tvar-id}
+        ctx (Vaisto.TypeChecker.Types/build-display-ctx (list tvar t))
+        tvar-str (Vaisto.TypeChecker.Types/format-type-with-ctx tvar ctx)
+        type-str (Vaisto.TypeChecker.Types/format-type-with-ctx t ctx)]
+    (-> (make-error "infinite type")
+        (with-note (erlang/iolist_to_binary
+                     (list tvar-str " cannot contain itself (found in " type-str ")")))
+        (with-hint "this usually means a recursive type without a base case"))))
 
 (defn cannot-unify [t1 t2]
   (-> (make-error "cannot unify types")
@@ -207,17 +212,44 @@
       (with-actual t2)))
 
 ; --- Error Formatting ---
+; Uses contextual normalization so type variables display as 'a, 'b
+; instead of raw IDs like t452, t890
 
+(defn format-optional [label value formatter]
+  (if (== value :none)
+    ""
+    (erlang/iolist_to_binary (list label (formatter value)))))
+
+(defn format-optional-with-ctx [label value ctx]
+  (if (== value :none)
+    ""
+    (erlang/iolist_to_binary
+      (list label (Vaisto.TypeChecker.Types/format-type-with-ctx value ctx)))))
+
+(defn identity [x] x)
+
+; Main error formatter - uses contextual type variable normalization
 (defn format-error [err]
   (let [msg (. err :message)
         expected (. err :expected)
         actual (. err :actual)
         note (. err :note)
-        hint (. err :hint)]
+        hint (. err :hint)
+        ; Build context from both types so 'a, 'b are consistent
+        types-to-normalize (collect-types-from-error expected actual)
+        ctx (Vaisto.TypeChecker.Types/build-display-ctx types-to-normalize)]
     (erlang/iolist_to_binary
       (list
         "error: " msg
-        (if (== expected :none) "" (list "\n  expected: " (Vaisto.TypeChecker.Types/format-type expected)))
-        (if (== actual :none) "" (list "\n  actual: " (Vaisto.TypeChecker.Types/format-type actual)))
-        (if (== note :none) "" (list "\n  note: " note))
-        (if (== hint :none) "" (list "\n  hint: " hint))))))
+        (format-optional-with-ctx "\n  expected: " expected ctx)
+        (format-optional-with-ctx "\n  actual: " actual ctx)
+        (format-optional "\n  note: " note identity)
+        (format-optional "\n  hint: " hint identity)))))
+
+; Collect types that need normalization (skip :none values)
+(defn collect-types-from-error [expected actual]
+  (match {expected actual}
+    [{:none :none} (list)]
+    [{:none a} (list a)]
+    [{e :none} (list e)]
+    [{e a} (list e a)]))

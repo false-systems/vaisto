@@ -69,3 +69,9 @@
   (match r
     [(Ok v) {:ok v}]
     [(Err e) {:error e}]))
+
+; --- Boolean Helpers ---
+
+; Boolean negation
+(defn not [b]
+  (if b false true))
