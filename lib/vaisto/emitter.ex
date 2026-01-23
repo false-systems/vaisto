@@ -85,6 +85,13 @@ defmodule Vaisto.Emitter do
     {:receive, [], [[do: clause_asts]]}
   end
 
+  # Do block → sequence of expressions, returning the last
+  # (do expr1 expr2 expr3) → (expr1; expr2; expr3)
+  def to_elixir({:do, exprs, _type}) do
+    expr_asts = Enum.map(exprs, &to_elixir/1)
+    {:__block__, [], expr_asts}
+  end
+
   # Let bindings → nested assignments using Elixir's block
   # (let [x 1 y 2] (+ x y)) → (x = 1; y = 2; x + y)
   def to_elixir({:let, bindings, body, _type}) do
@@ -240,6 +247,17 @@ defmodule Vaisto.Emitter do
   # send (!): call the GenServer with a message
   # (! pid :increment) → GenServer.call(pid, :increment)
   def to_elixir({:call, :"!", [pid_expr, msg_expr], _type}) do
+    pid = to_elixir(pid_expr)
+    msg = to_elixir(msg_expr)
+
+    quote do
+      GenServer.call(unquote(pid), unquote(msg))
+    end
+  end
+
+  # unsafe send (!!): same runtime behavior as !, just different type-checking
+  # The distinction is purely compile-time; at runtime they're identical.
+  def to_elixir({:call, :"!!", [pid_expr, msg_expr], _type}) do
     pid = to_elixir(pid_expr)
     msg = to_elixir(msg_expr)
 

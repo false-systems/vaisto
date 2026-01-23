@@ -486,6 +486,39 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
+  # Special form: unsafe send (!!) - sends to any PID without message validation
+  # (!! pid message) → :ok, requires PID but skips message type checking
+  # Use this for remote PIDs or when the PID's message type is unknown
+  def check({:call, :"!!", [pid_expr, msg_expr]}, env) do
+    with {:ok, pid_type, typed_pid} <- check(pid_expr, env),
+         {:ok, _msg_type, typed_msg} <- check(msg_expr, env) do
+      case pid_type do
+        # Case 1: Typed PID - we know the process type, but we deliberately
+        # skip message validation. The underscore _ ignores the process name
+        # and accepted messages — we don't care what they are.
+        {:pid, _process_name, _accepted_msgs} ->
+          {:ok, :ok, {:call, :"!!", [typed_pid, typed_msg], :ok}}
+
+        # Case 2: Untyped PID - a raw PID without type information.
+        # This happens when PIDs come from external sources or parameters.
+        :pid ->
+          {:ok, :ok, {:call, :"!!", [typed_pid, typed_msg], :ok}}
+
+        # Case 3: :any type - this is the "truly unsafe" case.
+        # The parameter has no type annotation, so we allow it.
+        # This is the whole point of !! — trusting the developer.
+        :any ->
+          {:ok, :ok, {:call, :"!!", [typed_pid, typed_msg], :ok}}
+
+        # Case 4: Not a PID at all - this is still an error!
+        # We catch obvious mistakes like (!! 42 :msg) or (!! "string" :msg).
+        # The "unsafe" part is about messages, not about accepting garbage.
+        other ->
+          {:error, Errors.send_to_non_pid(other)}
+      end
+    end
+  end
+
   # If expression: (if cond then else)
   def check({:if, condition, then_branch, else_branch}, env) do
     with {:ok, cond_type, typed_cond} <- check(condition, env),
@@ -552,6 +585,35 @@ defmodule Vaisto.TypeChecker do
 
   # Helper for generic function call handling (used when user overrides built-ins)
 
+  # Arithmetic operators with numeric type widening
+  # Handles: +, -, *, / with int/float/num type hierarchy
+  def check({:call, op, [left, right]}, env) when op in [:+, :-, :*] do
+    with {:ok, left_type, typed_left} <- check(left, env),
+         {:ok, right_type, typed_right} <- check(right, env),
+         {:ok, result_type} <- check_numeric_op(op, left_type, right_type) do
+      {:ok, result_type, {:call, op, [typed_left, typed_right], result_type}}
+    end
+  end
+
+  # Division always returns float
+  def check({:call, :/, [left, right]}, env) do
+    with {:ok, left_type, typed_left} <- check(left, env),
+         {:ok, right_type, typed_right} <- check(right, env),
+         :ok <- expect_numeric(left_type, "division"),
+         :ok <- expect_numeric(right_type, "division") do
+      {:ok, :float, {:call, :/, [typed_left, typed_right], :float}}
+    end
+  end
+
+  # Comparison operators with numeric type support
+  def check({:call, op, [left, right]}, env) when op in [:<, :>, :<=, :>=] do
+    with {:ok, left_type, typed_left} <- check(left, env),
+         {:ok, right_type, typed_right} <- check(right, env),
+         :ok <- expect_numeric(left_type, "comparison"),
+         :ok <- expect_numeric(right_type, "comparison") do
+      {:ok, :bool, {:call, op, [typed_left, typed_right], :bool}}
+    end
+  end
 
   # Function call (general case)
   def check({:call, func, args}, env) do
@@ -1494,6 +1556,18 @@ defmodule Vaisto.TypeChecker do
   defp types_match?({:tvar, _}, _), do: true
   defp types_match?(_, {:tvar, _}), do: true
   defp types_match?(t, t), do: true
+  # Singleton atoms match each other (they unify to :atom)
+  defp types_match?({:atom, _}, {:atom, _}), do: true
+  defp types_match?({:atom, _}, :atom), do: true
+  defp types_match?(:atom, {:atom, _}), do: true
+  # Numeric subtyping (directional):
+  # - :int and :float are subtypes of :num (can pass int/float where num expected)
+  # - :int is NOT a subtype of :float (can't pass int where float expected - debatable)
+  # - :float is NOT a subtype of :int (can't pass float where int expected)
+  # expected = :num accepts actual = :int or :float
+  defp types_match?(:num, :int), do: true
+  defp types_match?(:num, :float), do: true
+  # But NOT: types_match?(:int, :float) or types_match?(:float, :int)
   # List covariance: {:list, :int} matches {:list, :any}
   defp types_match?({:list, elem1}, {:list, elem2}), do: types_match?(elem1, elem2)
   # Function types: contravariant in args, covariant in return
@@ -1518,10 +1592,74 @@ defmodule Vaisto.TypeChecker do
   defp expect_bool(:any), do: :ok
   defp expect_bool(other), do: {:error, Errors.type_mismatch(:bool, other, hint: "conditions must be boolean")}
 
-  defp expect_same_type(t, t), do: :ok
-  defp expect_same_type(:any, _), do: :ok
-  defp expect_same_type(_, :any), do: :ok
-  defp expect_same_type(t1, t2), do: {:error, Errors.branch_type_mismatch(t1, t2)}
+  # Check that a type is numeric (int, float, or num)
+  defp expect_numeric(:int, _op), do: :ok
+  defp expect_numeric(:float, _op), do: :ok
+  defp expect_numeric(:num, _op), do: :ok
+  defp expect_numeric(:any, _op), do: :ok
+  defp expect_numeric({:tvar, _}, _op), do: :ok  # Type variables are assumed numeric in polymorphic contexts
+  defp expect_numeric(other, op), do: {:error, Errors.type_mismatch(:num, other, hint: "#{op} requires numeric operands")}
+
+  # Determine result type for arithmetic operations
+  # int op int → int
+  # float op float → float
+  # int op float or float op int → float
+  # any involving :num → :num
+  defp check_numeric_op(_op, :int, :int), do: {:ok, :int}
+  defp check_numeric_op(_op, :float, :float), do: {:ok, :float}
+  defp check_numeric_op(_op, :int, :float), do: {:ok, :float}
+  defp check_numeric_op(_op, :float, :int), do: {:ok, :float}
+  defp check_numeric_op(_op, :num, :num), do: {:ok, :num}
+  defp check_numeric_op(_op, :num, :int), do: {:ok, :num}
+  defp check_numeric_op(_op, :int, :num), do: {:ok, :num}
+  defp check_numeric_op(_op, :num, :float), do: {:ok, :num}
+  defp check_numeric_op(_op, :float, :num), do: {:ok, :num}
+  defp check_numeric_op(_op, :any, t) when t in [:int, :float, :num, :any], do: {:ok, :num}
+  defp check_numeric_op(_op, t, :any) when t in [:int, :float, :num, :any], do: {:ok, :num}
+  # Type variables in polymorphic contexts - return :num as the result
+  defp check_numeric_op(_op, {:tvar, _}, _), do: {:ok, :num}
+  defp check_numeric_op(_op, _, {:tvar, _}), do: {:ok, :num}
+  defp check_numeric_op(op, t1, t2) do
+    {:error, Errors.type_mismatch(:num, t1, hint: "#{op} requires numeric operands, got #{inspect(t1)} and #{inspect(t2)}")}
+  end
+
+  # Unify two types for branch expressions - returns the unified type or error
+  # This is used when branches need to return the same type (if, match, cond)
+  defp unify_types(t, t), do: {:ok, t}
+  defp unify_types(:any, t), do: {:ok, t}
+  defp unify_types(t, :any), do: {:ok, t}
+  # Singleton atoms unify to universal :atom
+  defp unify_types({:atom, _}, {:atom, _}), do: {:ok, :atom}
+  defp unify_types({:atom, _}, :atom), do: {:ok, :atom}
+  defp unify_types(:atom, {:atom, _}), do: {:ok, :atom}
+  # Numeric type widening: int + float → float
+  defp unify_types(:int, :float), do: {:ok, :float}
+  defp unify_types(:float, :int), do: {:ok, :float}
+  defp unify_types(:int, :num), do: {:ok, :num}
+  defp unify_types(:num, :int), do: {:ok, :num}
+  defp unify_types(:float, :num), do: {:ok, :num}
+  defp unify_types(:num, :float), do: {:ok, :num}
+  # List types unify if element types unify
+  defp unify_types({:list, t1}, {:list, t2}) do
+    case unify_types(t1, t2) do
+      {:ok, unified} -> {:ok, {:list, unified}}
+      error -> error
+    end
+  end
+  # Type variables unify with anything
+  defp unify_types({:tvar, _} = t, _), do: {:ok, t}
+  defp unify_types(_, {:tvar, _} = t), do: {:ok, t}
+  # Same sum types unify
+  defp unify_types({:sum, name, _} = t, {:sum, name, _}), do: {:ok, t}
+  # Otherwise, error
+  defp unify_types(t1, t2), do: {:error, Errors.branch_type_mismatch(t1, t2)}
+
+  defp expect_same_type(t1, t2) do
+    case unify_types(t1, t2) do
+      {:ok, _unified} -> :ok
+      error -> error
+    end
+  end
 
   defp check_handlers(handlers, state_type, env) do
     handler_env = Map.put(env, :state, state_type)

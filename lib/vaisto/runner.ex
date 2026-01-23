@@ -9,6 +9,16 @@ defmodule Vaisto.Runner do
   - Call Vaisto functions directly
   - Send messages to Vaisto processes
 
+  ## Backends
+
+  Vaisto supports two compilation backends:
+
+  - `:elixir` - Emits Elixir AST, uses GenServer for processes (default)
+  - `:core` - Emits Core Erlang directly, raw BEAM processes
+
+  The `:core` backend produces smaller bytecode and has no Elixir runtime
+  dependency, but processes use raw message passing instead of GenServer.
+
   ## Example
 
       # Compile and load a Vaisto module
@@ -18,6 +28,9 @@ defmodule Vaisto.Runner do
       # Call the function
       result = Vaisto.Runner.call(mod, :double, [21])
       # => 42
+
+      # Using Core Erlang backend
+      {:ok, mod} = Vaisto.Runner.compile_and_load(source, :MyMath, backend: :core)
 
   ## Process Example
 
@@ -39,12 +52,20 @@ defmodule Vaisto.Runner do
   @doc """
   Compiles Vaisto source code and loads it into the VM.
 
+  ## Options
+
+  - `:backend` - `:elixir` (default) or `:core`
+
   Returns {:ok, module_name} on success, {:error, reason} on failure.
   """
-  def compile_and_load(source, module_name \\ :VaistoModule) when is_binary(source) do
+  def compile_and_load(source, module_name \\ :VaistoModule, opts \\ [])
+
+  def compile_and_load(source, module_name, opts) when is_binary(source) do
+    backend = Keyword.get(opts, :backend, :elixir)
+
     with {:ok, ast} <- parse(source),
          {:ok, _type, typed_ast} <- typecheck(ast),
-         {:ok, actual_name, results} <- emit(typed_ast, module_name) do
+         {:ok, actual_name, results} <- emit(typed_ast, module_name, backend) do
       # Results can be:
       # - bytecode (binary) for single expressions or processes
       # - [{module, bytecode}, ...] list for modules
@@ -128,19 +149,23 @@ defmodule Vaisto.Runner do
   Note: This executes type-checked Vaisto code, not arbitrary Elixir code.
   The type system ensures safety before execution.
 
+  ## Options
+
+  - `:backend` - `:elixir` (default) or `:core`
+
   ## Example
 
       Vaisto.Runner.run("(+ 1 2)")
       # => {:ok, 3}
 
-      Vaisto.Runner.run("(let [x 10] (* x x))")
+      Vaisto.Runner.run("(let [x 10] (* x x))", backend: :core)
       # => {:ok, 100}
   """
-  def run(source) when is_binary(source) do
+  def run(source, opts \\ []) when is_binary(source) do
     # Generate a unique module name to avoid conflicts
     module_name = :"VaistoRun_#{:erlang.unique_integer([:positive])}"
 
-    with {:ok, ^module_name} <- compile_and_load(source, module_name) do
+    with {:ok, ^module_name} <- compile_and_load(source, module_name, opts) do
       result = call(module_name, :main)
       # Clean up the module
       :code.purge(module_name)
@@ -180,7 +205,11 @@ defmodule Vaisto.Runner do
     Vaisto.TypeChecker.check(ast)
   end
 
-  defp emit(typed_ast, module_name) do
-    Vaisto.Emitter.compile(typed_ast, module_name)
+  defp emit(typed_ast, module_name, backend) do
+    case backend do
+      :core -> Vaisto.CoreEmitter.compile(typed_ast, module_name)
+      :elixir -> Vaisto.Emitter.compile(typed_ast, module_name)
+      other -> {:error, "Unknown backend: #{inspect(other)}. Use :core or :elixir"}
+    end
   end
 end
