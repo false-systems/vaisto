@@ -19,9 +19,13 @@ defmodule Vaisto.CoreEmitter do
 
     case :compile.forms(core_ast, [:from_core, :binary, :return_errors]) do
       {:ok, ^module_name, binary} ->
+        # Load the module into the VM (matching Emitter's behavior)
+        :code.load_binary(module_name, ~c"vaisto", binary)
         {:ok, module_name, binary}
 
       {:ok, ^module_name, binary, _warnings} ->
+        # Load the module into the VM (matching Emitter's behavior)
+        :code.load_binary(module_name, ~c"vaisto", binary)
         {:ok, module_name, binary}
 
       {:error, errors, _warnings} ->
@@ -101,7 +105,7 @@ defmodule Vaisto.CoreEmitter do
       Enum.map(variants, fn {ctor_name, arg_types} ->
         arity = length(arg_types)
         # Create parameter variables: __arg0__, __arg1__, etc.
-        param_vars = for i <- 0..(arity - 1), do: :cerl.c_var(:"__arg#{i}__")
+        param_vars = Enum.map(0..(arity - 1)//1, fn i -> :cerl.c_var(:"__arg#{i}__") end)
         # Body: tuple of constructor name and args: {:Ctor, arg0, arg1, ...}
         body = :cerl.c_tuple([:cerl.c_atom(ctor_name) | param_vars])
         fun = :cerl.c_fun(param_vars, body)
@@ -211,6 +215,11 @@ defmodule Vaisto.CoreEmitter do
   # Single defval → wrap in module and compile
   def to_core({:defval, _, _, _} = defval, module_name) do
     to_core({:module, [defval]}, module_name)
+  end
+
+  # Single deftype → wrap in module (generates constructor functions)
+  def to_core({:deftype, _, _, _} = deftype, module_name) do
+    to_core({:module, [deftype]}, module_name)
   end
 
   # Single expression → module with main/0
@@ -547,6 +556,28 @@ defmodule Vaisto.CoreEmitter do
       :cerl.c_atom(:erlang),
       :cerl.c_atom(:length),
       [to_core_expr(list_expr, user_fns, local_vars)]
+    )
+  end
+
+  # --- Send operations ---
+
+  # Safe send (!) and unsafe send (!!) both compile to erlang:!/2
+  # The difference is purely at type-checking time — at runtime they're identical.
+  defp to_core_expr({:call, :"!", [pid_expr, msg_expr], _type}, user_fns, local_vars) do
+    :cerl.c_call(
+      :cerl.c_atom(:erlang),
+      :cerl.c_atom(:!),
+      [to_core_expr(pid_expr, user_fns, local_vars), to_core_expr(msg_expr, user_fns, local_vars)]
+    )
+  end
+
+  defp to_core_expr({:call, :"!!", [pid_expr, msg_expr], _type}, user_fns, local_vars) do
+    # !! compiles to the exact same thing as ! — erlang:!/2
+    # The "unsafe" nature is a compile-time distinction only
+    :cerl.c_call(
+      :cerl.c_atom(:erlang),
+      :cerl.c_atom(:!),
+      [to_core_expr(pid_expr, user_fns, local_vars), to_core_expr(msg_expr, user_fns, local_vars)]
     )
   end
 

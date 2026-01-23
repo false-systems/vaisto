@@ -122,13 +122,14 @@ defmodule Vaisto.Errors do
 
   @doc "Function not found"
   def unknown_function(name, opts \\ []) do
+    name_str = format_function_name(name)
     hint = case suggest_function(name) do
       nil -> nil
       suggestion -> "did you mean `#{suggestion}`?"
     end
     Error.new("unknown function",
       Keyword.merge(opts, [
-        note: "`#{name}` is not defined",
+        note: "`#{name_str}` is not defined",
         hint: hint
       ])
     )
@@ -208,4 +209,11 @@ defmodule Vaisto.Errors do
     end)
   end
   defp suggest_function(_), do: nil
+
+  defp format_function_name({:module_path, parts}) when is_list(parts) do
+    Enum.join(parts, ".")
+  end
+  defp format_function_name(name) when is_atom(name), do: Atom.to_string(name)
+  defp format_function_name(name) when is_binary(name), do: name
+  defp format_function_name(name), do: inspect(name)
 end

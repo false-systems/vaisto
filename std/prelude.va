@@ -75,3 +75,13 @@
 ; Boolean negation
 (defn not [b]
   (if b false true))
+
+; --- IO Helpers ---
+
+(extern io/format [:string (List :any)] :atom)
+
+(defn println [s]
+  (io/format "~s~n" (list s)))
+
+(defn print [x]
+  (io/format "~p" (list x)))
