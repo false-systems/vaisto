@@ -662,8 +662,8 @@ defmodule Vaisto.Parser do
   defp looks_typed?(_), do: false
 
   # Basic types
-  defp is_type_annotation?({:atom, t}) when t in [:int, :float, :string, :bool, :any, :atom, :unit], do: true
-  defp is_type_annotation?(t) when is_atom(t) and t in [:int, :float, :string, :bool, :any, :atom, :unit], do: true
+  defp is_type_annotation?({:atom, t}) when t in [:int, :float, :num, :string, :bool, :any, :atom, :unit], do: true
+  defp is_type_annotation?(t) when is_atom(t) and t in [:int, :float, :num, :string, :bool, :any, :atom, :unit], do: true
   # Parameterized types: (List :int), (Result :int :string)
   defp is_type_annotation?({:call, type_name, _args, _loc}) when is_atom(type_name), do: true
   # User-defined types (capitalized atoms)

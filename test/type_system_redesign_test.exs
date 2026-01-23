@@ -227,8 +227,6 @@ defmodule Vaisto.TypeSystemRedesignTest do
       assert {:error, %Vaisto.Error{}} = result
     end
 
-    # Future: when we add :num type annotation
-    @tag :skip
     test "function with num param accepts both" do
       code = """
       (defn double [x :num] :num (* x 2))
