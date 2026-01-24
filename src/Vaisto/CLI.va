@@ -1,0 +1,153 @@
+; Vaisto Self-Hosted CLI
+; Command-line interface for the compiler
+;
+; Usage:
+;   vaistoc file.va           - Compile file to BEAM
+;   vaistoc --eval "(+ 1 2)"  - Evaluate expression
+;   vaistoc --help            - Show help
+
+(ns Vaisto.CLI)
+
+(import Vaisto.Compiler)
+
+; --- Erlang FFI ---
+
+(extern init/get_plain_arguments [] (List :string))
+(extern file/read_file [:string] :any)
+(extern file/write_file [:string :any] :any)
+(extern io/format [:string (List :any)] :atom)
+(extern erlang/halt [:int] :any)
+(extern filename/basename [:string :string] :string)
+(extern filename/dirname [:string] :string)
+(extern filename/join [:string :string] :string)
+(extern string/titlecase [:string] :string)
+(extern code/load_binary [:atom :string :any] :any)
+(extern code/purge [:atom] :any)
+(extern code/delete [:atom] :any)
+(extern erlang/binary_to_atom [:string :atom] :atom)
+
+; --- Main Entry Point ---
+
+(defn main []
+  (let [args (init/get_plain_arguments)]
+    (run args)))
+
+(defn run [args]
+  (if (empty? args)
+    (print-help)
+    (let [first (head args)
+          rest (tail args)]
+      (if (is-help? first)
+        (print-help)
+        (if (is-eval? first)
+          (eval-code (head rest))
+          (if (empty? rest)
+            (compile-file first)
+            (if (is-output-flag? (head rest))
+              (compile-file-to first (head (tail rest)))
+              (error "Unknown arguments. Use --help for usage."))))))))
+
+; --- Compile File ---
+
+(defn compile-file [input]
+  (let [output (default-output input)
+        module-name (path-to-module input)]
+    (compile-file-to input output)))
+
+(defn compile-file-to [input output]
+  (let [module-name (path-to-module input)]
+    (match (file/read_file input)
+      [{:ok source}
+        (match (Vaisto.Compiler/compile source module-name)
+          [{:ok _mod bytecode}
+            (do
+              (file/write_file output bytecode)
+              (print-success input output))]
+          [{:error reason}
+            (print-error reason)])]
+      [{:error reason}
+        (error (format-read-error input reason))])))
+
+(defn default-output [input]
+  (let [dir (filename/dirname input)
+        base (filename/basename input ".va")
+        module (string/titlecase base)]
+    (filename/join dir (string-append module ".beam"))))
+
+(defn path-to-module [path]
+  (let [base (filename/basename path ".va")]
+    (erlang/binary_to_atom (string/titlecase base) :utf8)))
+
+; --- Eval Mode ---
+
+(defn eval-code [code]
+  (match (Vaisto.Compiler/compile code :VaistoEval)
+    [{:ok mod bytecode}
+      (do
+        (code/load_binary mod "vaisto_eval" bytecode)
+        (let [result (call-main mod)]
+          (do
+            (print-value result)
+            (code/purge mod)
+            (code/delete mod))))]
+    [{:error reason}
+      (print-error reason)]))
+
+; Call the main function of a module
+(extern erlang/apply [:atom :atom (List :any)] :any)
+(defn call-main [mod]
+  (erlang/apply mod :main (list)))
+
+; --- Output ---
+
+(defn print-help []
+  (io/format "vaistoc - The Vaisto Compiler~n~n" (list))
+  (io/format "Usage:~n" (list))
+  (io/format "  vaistoc <file.va>           Compile to BEAM~n" (list))
+  (io/format "  vaistoc <file.va> -o <out>  Compile to specific output~n" (list))
+  (io/format "  vaistoc --eval \"<code>\"     Evaluate expression~n" (list))
+  (io/format "  vaistoc --help              Show this help~n" (list)))
+
+(defn print-success [input output]
+  (io/format "✓ Compiled ~s → ~s~n" (list input output)))
+
+(defn print-error [reason]
+  (io/format "error: ~p~n" (list reason))
+  (erlang/halt 1))
+
+(defn print-value [val]
+  (io/format "~p~n" (list val)))
+
+(defn error [msg]
+  (io/format "error: ~s~n" (list msg))
+  (erlang/halt 1))
+
+(defn format-read-error [path reason]
+  (string-append "cannot read " (string-append path (string-append ": " (atom-to-string reason)))))
+
+; --- String Helpers ---
+
+(extern erlang/atom_to_binary [:atom :atom] :string)
+(defn atom-to-string [a]
+  (erlang/atom_to_binary a :utf8))
+
+(extern erlang/iolist_to_binary [(List :any)] :string)
+(defn string-append [a b]
+  (erlang/iolist_to_binary (list a b)))
+
+; --- Argument Checking ---
+
+(extern string/equal [:string :string] :bool)
+
+(defn is-help? [arg]
+  (if (string/equal arg "--help")
+    true
+    (string/equal arg "-h")))
+
+(defn is-eval? [arg]
+  (if (string/equal arg "--eval")
+    true
+    (string/equal arg "-e")))
+
+(defn is-output-flag? [arg]
+  (string/equal arg "-o"))
