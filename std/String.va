@@ -28,11 +28,11 @@
 ; Higher-level helpers
 
 ; Get length of string
-(defn length [s] :int
+(defn length [s]
   (erlang/byte_size s))
 
 ; Check if string is empty
-(defn empty? [s] :bool
+(defn empty? [s]
   (== (erlang/byte_size s) 0))
 
 ; Get a substring from start position with given length
@@ -57,7 +57,7 @@
   (erlang/iolist_to_binary (list a b)))
 
 ; Convert integer to string
-(defn from-int [n] :string
+(defn from-int [n]
   (erlang/integer_to_binary n))
 
 ; --- Additional functions for self-hosting ---
@@ -81,7 +81,7 @@
 (extern string/replace [:string :string :string] :string)
 
 ; Get first byte/character (returns codepoint)
-(defn first-char [s] :int
+(defn first-char [s]
   (binary/first s))
 
 ; Get rest of string after first byte
@@ -89,13 +89,13 @@
   (binary/part s 1))
 
 ; Check if string starts with given prefix
-(defn starts-with? [s prefix] :bool
+(defn starts-with? [s prefix]
   (match (string/prefix s prefix)
     [:nomatch false]
     [_ true]))
 
 ; Check if string contains substring
-(defn contains? [s needle] :bool
+(defn contains? [s needle]
   (match (string/find s needle)
     [:nomatch false]
     [_ true]))

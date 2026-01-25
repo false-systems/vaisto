@@ -7,7 +7,7 @@
 ; Core Erlang is not text - it's a tree of :cerl nodes built via the
 ; cerl module from the Erlang compiler application.
 
-(ns Vaisto.Compiler.CoreEmitter)
+(ns Elixir.Coreemitter)
 
 ; --- The Toolbelt: cerl module constructors ---
 ; These build Core Erlang AST nodes
@@ -142,7 +142,7 @@
         {main-exports main-defs} (build-main exprs user-fns)
 
         ; Collect all exports
-        fun-exports (lists/map (fn [{fname _}] fname) fun-defs)]
+        fun-exports (lists/map extract-fname fun-defs)]
 
     (cerl/c_module
       (cerl/c_atom module-name)
@@ -150,13 +150,17 @@
       (list)
       (lists/append fun-defs main-defs))))
 
+(defn extract-fname [pair]
+  (match pair
+    [{fname _fun} fname]))
+
 ; --- Definition Classification ---
 
 (defn is-definition? [form]
   (match form
-    [{:defn _ _ _ _} true]
-    [{:defn_multi _ _ _ _} true]
-    [{:defval _ _ _} true]
+    [{:defn _ _ _ _} true]        ; 5-element tuple: tag + name params body type
+    [{:defn_multi _ _ _ _} true]  ; 5-element tuple
+    [{:defval _ _ _} true]        ; 4-element tuple: tag + name value type
     [{:deftype _ _ _} true]
     [{:extern _ _ _} true]
     [{:ns _} true]
@@ -165,9 +169,9 @@
 
 (defn is-actual-defn? [form]
   (match form
-    [{:defn _ _ _ _} true]
-    [{:defn_multi _ _ _ _} true]
-    [{:defval _ _ _} true]
+    [{:defn _ _ _ _} true]        ; 5-element tuple
+    [{:defn_multi _ _ _ _} true]  ; 5-element tuple
+    [{:defval _ _ _} true]        ; 4-element tuple
     [_ false]))
 
 ; Build set of {name arity} pairs for user functions
@@ -185,42 +189,51 @@
 
 (defn emit-defn [defn user-fns]
   (match defn
-    ; Regular function
+    ; Regular function (5-tuple: defn name params body type)
     [{:defn name params body _type}
-      (let [param-vars (lists/map (fn [p] (cerl/c_var p)) params)
-            local-vars (sets/from_list params)
-            body-core (emit-expr body user-fns local-vars)
-            fun (cerl/c_fun param-vars body-core)
-            fname (cerl/c_fname name (length params))]
-        {fname fun})]
+      (emit-regular-defn name params body user-fns)]
 
-    ; Multi-clause function
+    ; Multi-clause function (5-tuple: defn_multi name arity clauses type)
     [{:defn_multi name arity clauses _type}
-      (let [; Single argument variable to match on
-            arg-var (cerl/c_var :__arg__)
-            param-vars (list arg-var)
+      (emit-multi-defn name arity clauses user-fns)]
 
-            ; Build case clauses
-            case-clauses (lists/map
-                           (fn [{pattern body _body-type}]
-                             (let [pattern-core (emit-multi-pattern pattern)
-                                   pattern-vars (extract-pattern-vars pattern)
-                                   local-vars (sets/from_list pattern-vars)
-                                   body-core (emit-expr body user-fns local-vars)]
-                               (cerl/c_clause (list pattern-core) (cerl/c_atom true) body-core)))
-                           clauses)
-
-            fun-body (cerl/c_case arg-var case-clauses)
-            fun (cerl/c_fun param-vars fun-body)
-            fname (cerl/c_fname name arity)]
-        {fname fun})]
-
-    ; Value binding → zero-arity function
+    ; Value binding (4-tuple: defval name value type)
     [{:defval name value _type}
-      (let [body-core (emit-expr value user-fns (sets/new))
-            fun (cerl/c_fun (list) body-core)
-            fname (cerl/c_fname name 0)]
-        {fname fun})]))
+      (emit-defval name value user-fns)]))
+
+(defn emit-regular-defn [name params body user-fns]
+  (let [param-vars (lists/map (fn [p] (cerl/c_var p)) params)
+        local-vars (sets/from_list params)
+        body-core (emit-expr body user-fns local-vars)
+        fun (cerl/c_fun param-vars body-core)
+        fname (cerl/c_fname name (length params))]
+    {fname fun}))
+
+(defn emit-multi-defn [name arity clauses user-fns]
+  (let [; Single argument variable to match on
+        arg-var (cerl/c_var :__arg__)
+        param-vars (list arg-var)
+
+        ; Build case clauses
+        case-clauses (lists/map
+                       (fn [{pattern body _body-type}]
+                         (let [pattern-core (emit-multi-pattern pattern)
+                               pattern-vars (extract-pattern-vars pattern)
+                               local-vars (sets/from_list pattern-vars)
+                               body-core (emit-expr body user-fns local-vars)]
+                           (cerl/c_clause (list pattern-core) (cerl/c_atom true) body-core)))
+                       clauses)
+
+        fun-body (cerl/c_case arg-var case-clauses)
+        fun (cerl/c_fun param-vars fun-body)
+        fname (cerl/c_fname name arity)]
+    {fname fun}))
+
+(defn emit-defval [name value user-fns]
+  (let [body-core (emit-expr value user-fns (sets/new))
+        fun (cerl/c_fun (list) body-core)
+        fname (cerl/c_fname name 0)]
+    {fname fun}))
 
 ; Build main/0 from remaining expressions
 (defn build-main [exprs user-fns]
@@ -318,30 +331,28 @@
 
     ; --- Function Calls ---
 
-    ; Arithmetic operators
-    [{:call op [left right] _type}
-      (if (is-arith-op? op)
-        (cerl/c_call
-          (cerl/c_atom :erlang)
-          (cerl/c_atom op)
-          (list (emit-expr left user-fns local-vars)
-                (emit-expr right user-fns local-vars)))
-        (emit-call op (list left right) user-fns local-vars))]
-
-    ; Comparison operators
-    [{:call op [left right] _type}
-      (if (is-cmp-op? op)
-        (cerl/c_call
-          (cerl/c_atom :erlang)
-          (cerl/c_atom (cmp-op-to-erlang op))
-          (list (emit-expr left user-fns local-vars)
-                (emit-expr right user-fns local-vars)))
-        (emit-call op (list left right) user-fns local-vars))]
-
-    ; Qualified call: Module/func
+    ; Qualified call: Module/func (must be checked before other call patterns!)
     [{:call {:qualified mod func} args _type}
       (let [arg-cores (lists/map (fn [a] (emit-expr a user-fns local-vars)) args)]
         (cerl/c_call (cerl/c_atom mod) (cerl/c_atom func) arg-cores))]
+
+    ; Arithmetic and comparison operators
+    [{:call op [left right] _type}
+      (cond
+        [(is-arith-op? op)
+          (cerl/c_call
+            (cerl/c_atom :erlang)
+            (cerl/c_atom op)
+            (list (emit-expr left user-fns local-vars)
+                  (emit-expr right user-fns local-vars)))]
+        [(is-cmp-op? op)
+          (cerl/c_call
+            (cerl/c_atom :erlang)
+            (cerl/c_atom (cmp-op-to-erlang op))
+            (list (emit-expr left user-fns local-vars)
+                  (emit-expr right user-fns local-vars)))]
+        [:else
+          (emit-call op (list left right) user-fns local-vars)])]
 
     ; List operations
     [{:call :head [lst] _type}
@@ -700,6 +711,8 @@
   (match op
     [:== :=:=]
     [:!= :/=]
+    [:<= :=<]   ; Erlang uses =< not <=
+    [:>= :>=]
     [_ op]))
 
 (extern erlang/is_integer [:any] :bool)

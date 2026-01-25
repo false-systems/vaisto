@@ -6,10 +6,12 @@
 
 (ns Vaisto.Compiler)
 
-(import Vaisto.Lexer)
-(import Vaisto.Parser)
-(import Vaisto.TypeChecker)
-(import Vaisto.Compiler.CoreEmitter)
+; Import modules using Elixir. prefix for bootstrapped builds
+; (Module names derive from filename only, not namespace path)
+(import Elixir.Lexer)
+(import Elixir.Parser)
+(import Elixir.Typechecker)
+(import Elixir.Coreemitter)
 
 ; Erlang FFI
 (extern file/read_file [:string] :any)
@@ -30,7 +32,7 @@
   (match (compile source module-name)
     [{:ok mod binary}
       (do
-        (Vaisto.Compiler.CoreEmitter/compile-and-load binary mod)
+        (Elixir.Coreemitter/compile-and-load binary mod)
         {:ok mod})]
     [error error]))
 
@@ -47,25 +49,55 @@
 ; Stage 1: Lexing
 ; Lexer takes source string and filename, returns token list
 (defn lex [source filename]
-  (Vaisto.Lexer/tokenize source (atom-to-string filename)))
+  (Elixir.Lexer/tokenize source (atom-to-string filename)))
 
 ; Stage 2: Parsing
 (defn parse-tokens [tokens]
   (match tokens
     [{:error reason} {:error reason}]
-    [toks (Vaisto.Parser/parse toks)]))
+    [toks (Elixir.Parser/parse toks)]))
 
 ; Stage 3: Type Checking
 (defn type-check [ast]
   (match ast
     [{:error reason} {:error reason}]
-    [forms (Vaisto.TypeChecker/check-module forms)]))
+    [forms
+      (match (Elixir.Typechecker/check-module forms (primitives-env))
+        [(Ok result) (. result :ast)]
+        [(Err err) {:error err}])]))
+
+; Basic primitives environment with common functions
+(extern maps/new [] :any)
+(extern maps/put [:any :any :any] :any)
+
+(defn primitives-env []
+  (let [m0 (maps/new)
+        ; Use :any for numeric operations to be flexible with int/float/num
+        m1 (maps/put :+ {:fn (list :any :any) :any} m0)
+        m2 (maps/put :* {:fn (list :any :any) :any} m1)
+        m3 (maps/put :- {:fn (list :any :any) :any} m2)
+        m4 (maps/put :/ {:fn (list :any :any) :any} m3)
+        m5 (maps/put :== {:fn (list :any :any) :bool} m4)
+        m6 (maps/put :/= {:fn (list :any :any) :bool} m5)
+        m7 (maps/put :< {:fn (list :any :any) :bool} m6)
+        m8 (maps/put :> {:fn (list :any :any) :bool} m7)
+        m9 (maps/put :<= {:fn (list :any :any) :bool} m8)
+        m10 (maps/put :>= {:fn (list :any :any) :bool} m9)
+        m11 (maps/put :head {:fn (list {:list :any}) :any} m10)
+        m12 (maps/put :tail {:fn (list {:list :any}) {:list :any}} m11)
+        m13 (maps/put :cons {:fn (list :any {:list :any}) {:list :any}} m12)
+        m14 (maps/put :empty? {:fn (list {:list :any}) :bool} m13)
+        m15 (maps/put :length {:fn (list {:list :any}) :int} m14)
+        m16 (maps/put :list {:fn (list) {:list :any}} m15)
+        m17 (maps/put :not {:fn (list :bool) :bool} m16)
+        m18 (maps/put :print {:fn (list :any) :unit} m17)]
+    (maps/put :println {:fn (list :string) :unit} m18)))
 
 ; Stage 4: Core Erlang Emission
 (defn emit-core [typed-ast module-name]
   (match typed-ast
     [{:error reason} {:error reason}]
-    [ast (Vaisto.Compiler.CoreEmitter/compile ast module-name)]))
+    [ast (Elixir.Coreemitter/compile ast module-name)]))
 
 ; --- Utility Functions ---
 

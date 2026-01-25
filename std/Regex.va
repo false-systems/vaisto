@@ -13,6 +13,11 @@
 (extern erlang/length [(List :any)] :int)
 (extern erlang/byte_size [:binary] :int)
 (extern erlang/iolist_to_binary [(List :any)] :string)
+(extern lists/map [:any (List :any)] (List :any))
+
+; Helper: wrap lists/map for cleaner usage
+(defn map [f xs]
+  (lists/map f xs))
 
 ; Binary operations
 (extern binary/part [:binary :int :int] :binary)
@@ -50,7 +55,7 @@
 
 ; Test if string matches pattern (returns bool)
 ; (matches? "hello123" "\\d+") -> true
-(defn matches? [string pattern] :bool
+(defn matches? [string pattern]
   (match (re/run string pattern)
     [{:match _} true]
     [:nomatch false]))
@@ -173,14 +178,14 @@
 ; --- Position tracking for error messages ---
 
 ; Count newlines in a string (for line number tracking)
-(defn count-newlines [string] :int
+(defn count-newlines [string]
   (let [matches (re/run string "\n" (list :global))]
     (match matches
       [{:match list} (erlang/length list)]
       [:nomatch 0])))
 
 ; Find column of last line (chars after last newline)
-(defn last-line-length [string] :int
+(defn last-line-length [string]
   (match (find-pos string "\n[^\n]*$")
     [(Some m) (- (. m :len) 1)]  ; subtract the newline itself
     [(None) (erlang/byte_size string)]))
@@ -217,5 +222,5 @@
 
 ; Check if string starts with prefix
 ; (starts-with? "hello" "hel") -> true
-(defn starts-with? [string prefix] :bool
+(defn starts-with? [string prefix]
   (== (peek string (erlang/byte_size prefix)) prefix))

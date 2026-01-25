@@ -6,9 +6,9 @@
 ; - Finding free type variables
 ; - Composing substitutions
 
-(ns Vaisto.TypeChecker.Core)
+(ns Elixir.Core)
 
-(import Std.State)
+(import Elixir.State)
 
 ; Erlang FFI
 (extern maps/get [:any :any :any] :any)

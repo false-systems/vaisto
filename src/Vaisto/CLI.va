@@ -8,7 +8,9 @@
 
 (ns Vaisto.CLI)
 
-(import Vaisto.Compiler)
+; Import the Compiler module
+; Note: For bootstrapped builds, module names use short form (Compiler, not Vaisto.Compiler)
+(import Compiler)
 
 ; --- Erlang FFI ---
 
@@ -25,11 +27,23 @@
 (extern code/purge [:atom] :any)
 (extern code/delete [:atom] :any)
 (extern erlang/binary_to_atom [:string :atom] :atom)
+(extern lists/map [:any (List :any)] (List :any))
 
 ; --- Main Entry Point ---
 
+; Convert Erlang string (charlist) to binary
+(extern erlang/list_to_binary [(List :int)] :string)
+; Convert binary to charlist
+(extern erlang/binary_to_list [:string] (List :int))
+(defn binary-to-list [b]
+  (erlang/binary_to_list b))
+(defn charlist-to-binary [chars]
+  (erlang/list_to_binary chars))
+
 (defn main []
-  (let [args (init/get_plain_arguments)]
+  (let [raw-args (init/get_plain_arguments)
+        ; Convert charlists to binaries
+        args (lists/map charlist-to-binary raw-args)]
     (run args)))
 
 (defn run [args]
@@ -58,7 +72,7 @@
   (let [module-name (path-to-module input)]
     (match (file/read_file input)
       [{:ok source}
-        (match (Vaisto.Compiler/compile source module-name)
+        (match (Elixir.Compiler/compile source module-name)
           [{:ok _mod bytecode}
             (do
               (file/write_file output bytecode)
@@ -80,18 +94,24 @@
 
 ; --- Eval Mode ---
 
+; Wrap user code in a main function for eval
+(defn wrap-in-main [code]
+  (string-append "(defn main [] " (string-append code ")")))
+
 (defn eval-code [code]
-  (match (Vaisto.Compiler/compile code :VaistoEval)
-    [{:ok mod bytecode}
-      (do
-        (code/load_binary mod "vaisto_eval" bytecode)
-        (let [result (call-main mod)]
-          (do
-            (print-value result)
-            (code/purge mod)
-            (code/delete mod))))]
-    [{:error reason}
-      (print-error reason)]))
+  (let [wrapped (wrap-in-main code)]
+    (match (Elixir.Compiler/compile wrapped :VaistoEval)
+      [{:ok mod bytecode}
+        (do
+          ; code:load_binary requires charlist filename, not binary
+          (code/load_binary mod (binary-to-list "vaisto_eval") bytecode)
+          (let [result (call-main mod)]
+            (do
+              (print-value result)
+              (code/purge mod)
+              (code/delete mod))))]
+      [{:error reason}
+        (print-error reason)])))
 
 ; Call the main function of a module
 (extern erlang/apply [:atom :atom (List :any)] :any)

@@ -6,13 +6,13 @@
 ; 1. Collect all signatures (functions, types)
 ; 2. Type-check bodies with full environment
 
-(ns Vaisto.TypeChecker)
+(ns Elixir.Typechecker)
 
-(import Vaisto.TypeChecker.Types)
-(import Vaisto.TypeChecker.Core)
-(import Vaisto.TypeChecker.Context)
-(import Vaisto.TypeChecker.Unify)
-(import Vaisto.TypeChecker.Errors)
+(import Elixir.Tctypes)
+(import Elixir.Tccore)
+(import Elixir.Tccontext)
+(import Elixir.Tcunify)
+(import Elixir.Tcerrors)
 
 ; Erlang FFI
 (extern maps/get [:any :any :any] :any)
@@ -102,12 +102,13 @@
 (defn check-var [name env]
   (let [lookup (maps/get name env :not-found)]
     (match lookup
-      [:not-found (Err (Vaisto.TypeChecker.Errors/undefined-variable name))]
+      [:not-found (Err (Elixir.Tcerrors/undefined-variable name))]
       [t (Ok #{ :type t :ast {:var name t}})])))
 
 (defn check-compound [expr env]
   (match expr
-    ; List literal
+    ; List literal (with or without loc)
+    [{:list elements _loc} (check-list elements env)]
     [{:list elements} (check-list elements env)]
 
     ; Empty bracket = empty list
@@ -168,7 +169,7 @@
     [{:import module alias} (Ok #{ :type :import :ast {:import module alias}})]
 
     ; Unknown
-    [_ (Err (Vaisto.TypeChecker.Errors/make-error "unknown expression"))]))
+    [_ (Err (Elixir.Tcerrors/make-error "unknown expression"))]))
 
 ; --- List Type Checking ---
 
@@ -187,13 +188,13 @@
 
 (defn check-list-elements [elements elem-type env acc]
   (match elements
-    [[] (Ok {:asts (lists/reverse acc)})]
+    [[] (Ok #{ :asts (lists/reverse acc)})]
     [[e | rest]
       (match (check-expr e env)
         [(Ok result)
           (if (types-match? elem-type (. result :type))
             (check-list-elements rest elem-type env (cons (. result :ast) acc))
-            (Err (Vaisto.TypeChecker.Errors/list-type-mismatch elem-type (. result :type))))]
+            (Err (Elixir.Tcerrors/list-type-mismatch elem-type (. result :type))))]
         [(Err err) (Err err)])]))
 
 ; --- Tuple Expression (Erlang Interop) ---
@@ -250,14 +251,14 @@
   (match record-type
     [{:record _name fields}
       (match (lists/keyfind field 1 fields)
-        [false (Err (Vaisto.TypeChecker.Errors/make-error "field not found"))]
+        [false (Err (Elixir.Tcerrors/make-error "field not found"))]
         [{_ field-type} (Ok field-type)])]
     [{:row fields _tail}
       (match (lists/keyfind field 1 fields)
         [false (Ok :any)]  ; Row polymorphism - field might be in tail
         [{_ field-type} (Ok field-type)])]
     [:any (Ok :any)]
-    [_ (Err (Vaisto.TypeChecker.Errors/make-error "field access requires record type"))]))
+    [_ (Err (Elixir.Tcerrors/make-error "field access requires record type"))]))
 
 ; --- If Expression ---
 
@@ -265,7 +266,7 @@
   (match (check-expr cond-expr env)
     [(Ok cond-result)
       (if (not (types-match? :bool (. cond-result :type)))
-        (Err (Vaisto.TypeChecker.Errors/type-mismatch :bool (. cond-result :type)))
+        (Err (Elixir.Tcerrors/type-mismatch :bool (. cond-result :type)))
         (match (check-expr then-expr env)
           [(Ok then-result)
             (match (check-expr else-expr env)
@@ -273,7 +274,7 @@
                 (if (types-match? (. then-result :type) (. else-result :type))
                   (Ok #{ :type (. then-result :type)
                        :ast {:if (. cond-result :ast) (. then-result :ast) (. else-result :ast) (. then-result :type)}})
-                  (Err (Vaisto.TypeChecker.Errors/branch-type-mismatch (. then-result :type) (. else-result :type))))]
+                  (Err (Elixir.Tcerrors/branch-type-mismatch (. then-result :type) (. else-result :type))))]
               [(Err e) (Err e)])]
           [(Err e) (Err e)]))]
     [(Err e) (Err e)]))
@@ -292,7 +293,7 @@
 
 (defn check-bindings [bindings env acc]
   (match bindings
-    [[] (Ok {:env env :typed-bindings (lists/reverse acc)})]
+    [[] (Ok #{ :env env :typed-bindings (lists/reverse acc)})]
     [[{name expr} | rest]
       (match (check-expr expr env)
         [(Ok result)
@@ -315,7 +316,7 @@
 
 (defn check-match-clauses [clauses expr-type env]
   (match clauses
-    [[] (Err (Vaisto.TypeChecker.Errors/make-error "empty match"))]
+    [[] (Err (Elixir.Tcerrors/make-error "empty match"))]
     [[{pattern body} | rest]
       (match (check-match-clause pattern body expr-type env)
         [(Ok first-result)
@@ -342,7 +343,7 @@
         [(Ok result)
           (if (types-match? expected-type (. result :body-type))
             (check-remaining-clauses rest expr-type expected-type env (cons (. result :clause) acc))
-            (Err (Vaisto.TypeChecker.Errors/branch-type-mismatch expected-type (. result :body-type))))]
+            (Err (Elixir.Tcerrors/branch-type-mismatch expected-type (. result :body-type))))]
         [(Err e) (Err e)])]))
 
 ; --- Do Block ---
@@ -354,7 +355,7 @@
 
 (defn check-do-exprs [exprs env acc]
   (match exprs
-    [[] (Err (Vaisto.TypeChecker.Errors/make-error "empty do block"))]
+    [[] (Err (Elixir.Tcerrors/make-error "empty do block"))]
     [[last-expr]
       (match (check-expr last-expr env)
         [(Ok result)
@@ -382,21 +383,37 @@
 ; --- Function Call ---
 
 (defn check-call [func args env]
-  (match (lookup-function func env)
-    [(Ok func-type)
-      (match (check-args args env)
-        [(Ok args-result)
-          (match (unify-call func-type (. args-result :types))
-            [(Ok ret-type)
-              (Ok #{ :type ret-type :ast {:call func (. args-result :asts) ret-type}})]
+  (match func
+    ; Qualified call: {:qualified mod func-name}
+    [{:qualified mod func-name}
+      (let [extern-key {:qualified mod func-name}]
+        (match (lookup-function extern-key env)
+          [(Ok func-type)
+            (match (check-args args env)
+              [(Ok args-result)
+                (match (unify-call func-type (. args-result :types))
+                  [(Ok ret-type)
+                    (Ok #{ :type ret-type :ast {:call {:qualified mod func-name} (. args-result :asts) ret-type}})]
+                  [(Err e) (Err e)])]
+              [(Err e) (Err e)])]
+          [(Err e) (Err e)]))]
+    ; Regular call
+    [_
+      (match (lookup-function func env)
+        [(Ok func-type)
+          (match (check-args args env)
+            [(Ok args-result)
+              (match (unify-call func-type (. args-result :types))
+                [(Ok ret-type)
+                  (Ok #{ :type ret-type :ast {:call func (. args-result :asts) ret-type}})]
+                [(Err e) (Err e)])]
             [(Err e) (Err e)])]
-        [(Err e) (Err e)])]
-    [(Err e) (Err e)]))
+        [(Err e) (Err e)])]))
 
 (defn lookup-function [func env]
   (let [result (maps/get func env :not-found)]
     (match result
-      [:not-found (Err (Vaisto.TypeChecker.Errors/unknown-function func))]
+      [:not-found (Err (Elixir.Tcerrors/unknown-function func))]
       [t (Ok t)])))
 
 (defn check-args [args env]
@@ -417,12 +434,12 @@
   (match func-type
     [{:fn expected-args ret-type}
       (if (!= (erlang/length expected-args) (erlang/length arg-types))
-        (Err (Vaisto.TypeChecker.Errors/arity-mismatch :function (erlang/length expected-args) (erlang/length arg-types)))
+        (Err (Elixir.Tcerrors/arity-mismatch :function (erlang/length expected-args) (erlang/length arg-types)))
         (match (check-arg-types expected-args arg-types)
           [(Ok _) (Ok ret-type)]
           [(Err e) (Err e)]))]
     [:any (Ok :any)]
-    [_ (Err (Vaisto.TypeChecker.Errors/not-a-function :call func-type))]))
+    [_ (Err (Elixir.Tcerrors/not-a-function :call func-type))]))
 
 (defn check-arg-types [expected actual]
   (match {expected actual}
@@ -430,8 +447,8 @@
     [{[e | erest] [a | arest]}
       (if (types-match? e a)
         (check-arg-types erest arest)
-        (Err (Vaisto.TypeChecker.Errors/type-mismatch e a)))]
-    [_ (Err (Vaisto.TypeChecker.Errors/make-error "arg count mismatch"))]))
+        (Err (Elixir.Tcerrors/type-mismatch e a)))]
+    [_ (Err (Elixir.Tcerrors/make-error "arg count mismatch"))]))
 
 ; --- Function Definition ---
 
@@ -459,7 +476,7 @@
           (let [func-type {:fn param-types (. body-result :type)}]
             (Ok #{ :type func-type
                  :ast {:defn name param-names (. body-result :ast) func-type}}))
-          (Err (Vaisto.TypeChecker.Errors/return-type-mismatch ret-type (. body-result :type))))]
+          (Err (Elixir.Tcerrors/return-type-mismatch ret-type (. body-result :type))))]
       [(Err e) (Err e)])))
 
 ; --- Type Definition ---
@@ -479,7 +496,9 @@
 ; --- Extern Declaration ---
 
 (defn check-extern [mod func arg-types ret-type env]
-  (let [func-type {:fn arg-types ret-type}]
+  (let [normalized-args (lists/map normalize-type arg-types)
+        normalized-ret (normalize-type ret-type)
+        func-type {:fn normalized-args normalized-ret}]
     (Ok #{ :type :extern :ast {:extern mod func func-type}})))
 
 ; --- Module Checking (Two-Pass) ---
@@ -494,8 +513,13 @@
   (lists/foldl
     (fn [form acc-env]
       (match form
+        ; defn with location (6-tuple): tag name params body ret-type loc
+        [{:defn name params _body ret-type _loc}
+          (let [param-types (lists/map extract-param-type params)]
+            (maps/put name {:fn param-types ret-type} acc-env))]
+        ; defn without location (5-tuple)
         [{:defn name params _body ret-type}
-          (let [param-types (lists/map (fn [p] (match p [{_ t} t])) params)]
+          (let [param-types (lists/map extract-param-type params)]
             (maps/put name {:fn param-types ret-type} acc-env))]
         [{:deftype name {:product fields}}
           (let [field-types (lists/map (fn [f] (match f [{_ t} t])) fields)
@@ -508,11 +532,31 @@
             (register-variant-ctors variants sum-type env-with-type))]
         [{:extern mod func arg-types ret-type}
           (let [extern-name (make-extern-name mod func)
-                func-type {:fn arg-types ret-type}]
+                normalized-args (lists/map normalize-type arg-types)
+                normalized-ret (normalize-type ret-type)
+                func-type {:fn normalized-args normalized-ret}]
             (maps/put extern-name func-type acc-env))]
         [_ acc-env]))
     env
     forms))
+
+; Extract type from parameter - handles both {name type} pairs and bare names
+(defn extract-param-type [p]
+  (match p
+    [{_ t} (normalize-type t)]    ; {name type} pair
+    [_ :any]))   ; bare symbol defaults to :any
+
+; Normalize a parsed type expression into a type
+; {:atom :string} → :string
+; {:call List [{:atom :any}] _} → {:list :any}
+(defn normalize-type [t]
+  (match t
+    ; Keyword atom → bare atom
+    [{:atom a} a]
+    ; List type constructor: (List :elem)
+    [{:call :List [elem] _loc} {:list (normalize-type elem)}]
+    ; Already a bare atom
+    [a (if (erlang/is_atom a) a t)]))
 
 (defn register-variant-ctors [variants sum-type env]
   (lists/foldl

@@ -6,9 +6,9 @@
 ; - Expected vs actual types
 ; - Hints for fixing
 
-(ns Vaisto.TypeChecker.Errors)
+(ns Elixir.Tcerrors)
 
-(import Vaisto.TypeChecker.Types)
+(import Elixir.Tctypes)
 
 ; Erlang FFI
 (extern erlang/iolist_to_binary [(List :any)] :string)
@@ -17,63 +17,27 @@
 (extern lists/map [:any (List :any)] (List :any))
 
 ; --- Error Record ---
-; Structured error with all diagnostic info
-
-(deftype TypeError
-  [message :string
-   expected :any
-   actual :any
-   note :any
-   hint :any
-   loc :any])
+; Structured error with all diagnostic info as a map
 
 (defn make-error [message]
-  (TypeError message :none :none :none :none :none))
+  #{ :message message :expected :none :actual :none :note :none :hint :none :loc :none})
+
+(extern maps/put [:any :any :any] :any)
 
 (defn with-expected [err expected]
-  (TypeError
-    (. err :message)
-    expected
-    (. err :actual)
-    (. err :note)
-    (. err :hint)
-    (. err :loc)))
+  (maps/put :expected expected err))
 
 (defn with-actual [err actual]
-  (TypeError
-    (. err :message)
-    (. err :expected)
-    actual
-    (. err :note)
-    (. err :hint)
-    (. err :loc)))
+  (maps/put :actual actual err))
 
 (defn with-note [err note]
-  (TypeError
-    (. err :message)
-    (. err :expected)
-    (. err :actual)
-    note
-    (. err :hint)
-    (. err :loc)))
+  (maps/put :note note err))
 
 (defn with-hint [err hint]
-  (TypeError
-    (. err :message)
-    (. err :expected)
-    (. err :actual)
-    (. err :note)
-    hint
-    (. err :loc)))
+  (maps/put :hint hint err))
 
 (defn with-loc [err loc]
-  (TypeError
-    (. err :message)
-    (. err :expected)
-    (. err :actual)
-    (. err :note)
-    (. err :hint)
-    loc))
+  (maps/put :loc loc err))
 
 ; --- Type Mismatch Errors ---
 
@@ -154,7 +118,15 @@
 (defn unknown-function [name]
   (-> (make-error "unknown function")
       (with-note (erlang/iolist_to_binary
-                   (list "`" (erlang/atom_to_binary name) "` is not defined")))))
+                   (list "`" (format-function-name name) "` is not defined")))))
+
+; Format a function name (handles both atoms and {:qualified mod func})
+(defn format-function-name [name]
+  (match name
+    [{:qualified mod func}
+      (erlang/iolist_to_binary
+        (list (erlang/atom_to_binary mod) "/" (erlang/atom_to_binary func)))]
+    [_ (erlang/atom_to_binary name)]))
 
 (defn unknown-type [name]
   (-> (make-error "unknown type")
@@ -198,9 +170,9 @@
 (defn infinite-type [tvar-id t]
   ; Format with context so the tvar shows as 'a not t452
   (let [tvar {:tvar tvar-id}
-        ctx (Vaisto.TypeChecker.Types/build-display-ctx (list tvar t))
-        tvar-str (Vaisto.TypeChecker.Types/format-type-with-ctx tvar ctx)
-        type-str (Vaisto.TypeChecker.Types/format-type-with-ctx t ctx)]
+        ctx (Elixir.Tctypes/build-display-ctx (list tvar t))
+        tvar-str (Elixir.Tctypes/format-type-with-ctx tvar ctx)
+        type-str (Elixir.Tctypes/format-type-with-ctx t ctx)]
     (-> (make-error "infinite type")
         (with-note (erlang/iolist_to_binary
                      (list tvar-str " cannot contain itself (found in " type-str ")")))
@@ -224,7 +196,7 @@
   (if (== value :none)
     ""
     (erlang/iolist_to_binary
-      (list label (Vaisto.TypeChecker.Types/format-type-with-ctx value ctx)))))
+      (list label (Elixir.Tctypes/format-type-with-ctx value ctx)))))
 
 (defn identity [x] x)
 
@@ -237,7 +209,7 @@
         hint (. err :hint)
         ; Build context from both types so 'a, 'b are consistent
         types-to-normalize (collect-types-from-error expected actual)
-        ctx (Vaisto.TypeChecker.Types/build-display-ctx types-to-normalize)]
+        ctx (Elixir.Tctypes/build-display-ctx types-to-normalize)]
     (erlang/iolist_to_binary
       (list
         "error: " msg

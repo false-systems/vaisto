@@ -73,7 +73,7 @@
 
 ; Check if key exists
 ; (has? :my-key) -> bool
-(defn has? [key] :bool
+(defn has? [key]
   (match (erlang/get key)
     [:undefined false]
     [_ true]))
