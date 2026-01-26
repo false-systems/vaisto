@@ -24,5 +24,6 @@ Thumbs.db
 # Vaisto compiled output
 *.va.beam
 /vaistoc
-std/**/*.beam
-std/**/*.vsi
+*.vsi
+/build/
+/ebin/
