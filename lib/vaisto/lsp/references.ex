@@ -6,8 +6,6 @@ defmodule Vaisto.LSP.References do
   documents and supports safe renaming with workspace edits.
   """
 
-  alias Vaisto.Parser
-
   # ============================================================================
   # Public API
   # ============================================================================
@@ -94,177 +92,9 @@ defmodule Vaisto.LSP.References do
   # Symbol Search
   # ============================================================================
 
+  # Text-based search provides accurate character-level positions
+  # for all symbol occurrences including variable references
   defp find_symbol_occurrences(text, symbol, uri) do
-    try do
-      ast = Parser.parse(text)
-      forms = if is_list(ast), do: ast, else: [ast]
-
-      # Walk AST and collect all occurrences
-      forms
-      |> Enum.flat_map(&find_in_form(&1, symbol, uri))
-    rescue
-      _ ->
-        # If parsing fails, fall back to text search
-        find_symbol_textually(text, symbol, uri)
-    end
-  end
-
-  # Walk a form and find all occurrences of symbol
-  defp find_in_form(form, symbol, uri) do
-    symbol_atom = if is_binary(symbol), do: String.to_atom(symbol), else: symbol
-
-    collect_locations(form, symbol_atom, uri)
-  end
-
-  defp collect_locations(form, target, uri) do
-    do_collect(form, target, uri, [])
-    |> Enum.reverse()
-  end
-
-  # Function definition - check name
-  defp do_collect({:defn, name, params, body, loc}, target, uri, acc) do
-    acc = if name == target do
-      [make_location(uri, loc, name) | acc]
-    else
-      acc
-    end
-    # Also check params and body
-    acc = Enum.reduce(params, acc, &do_collect(&1, target, uri, &2))
-    do_collect(body, target, uri, acc)
-  end
-
-  defp do_collect({:defn, name, params, body, _ret, loc}, target, uri, acc) do
-    acc = if name == target do
-      [make_location(uri, loc, name) | acc]
-    else
-      acc
-    end
-    acc = Enum.reduce(params, acc, &do_collect(&1, target, uri, &2))
-    do_collect(body, target, uri, acc)
-  end
-
-  # Type definition
-  defp do_collect({:deftype, name, def, loc}, target, uri, acc) do
-    acc = if name == target do
-      [make_location(uri, loc, name) | acc]
-    else
-      acc
-    end
-    do_collect(def, target, uri, acc)
-  end
-
-  # Process definition
-  defp do_collect({:process, name, init, handlers, loc}, target, uri, acc) do
-    acc = if name == target do
-      [make_location(uri, loc, name) | acc]
-    else
-      acc
-    end
-    acc = do_collect(init, target, uri, acc)
-    Enum.reduce(handlers, acc, &do_collect(&1, target, uri, &2))
-  end
-
-  # Function call
-  defp do_collect({:call, name, args, loc}, target, uri, acc) when is_atom(name) do
-    acc = if name == target do
-      [make_location(uri, loc, name) | acc]
-    else
-      acc
-    end
-    Enum.reduce(args, acc, &do_collect(&1, target, uri, &2))
-  end
-
-  # Variable reference
-  defp do_collect({:var, name, _type}, target, _uri, acc) when is_atom(name) do
-    # Variables don't have location info in typed AST, skip for now
-    if name == target do
-      acc  # Would need to track location
-    else
-      acc
-    end
-  end
-
-  # Let binding
-  defp do_collect({:let, bindings, body, _type}, target, uri, acc) do
-    acc = Enum.reduce(bindings, acc, fn
-      {{:var, name, _}, expr, _}, a ->
-        a = if name == target, do: a, else: a  # TODO: add location
-        do_collect(expr, target, uri, a)
-      _, a -> a
-    end)
-    do_collect(body, target, uri, acc)
-  end
-
-  # If expression
-  defp do_collect({:if, cond, then_br, else_br, _type}, target, uri, acc) do
-    acc = do_collect(cond, target, uri, acc)
-    acc = do_collect(then_br, target, uri, acc)
-    do_collect(else_br, target, uri, acc)
-  end
-
-  # Match expression
-  defp do_collect({:match, expr, clauses, _type}, target, uri, acc) do
-    acc = do_collect(expr, target, uri, acc)
-    Enum.reduce(clauses, acc, fn {pattern, body}, a ->
-      a = do_collect(pattern, target, uri, a)
-      do_collect(body, target, uri, a)
-    end)
-  end
-
-  # Do block
-  defp do_collect({:do, exprs, _type}, target, uri, acc) do
-    Enum.reduce(exprs, acc, &do_collect(&1, target, uri, &2))
-  end
-
-  # List
-  defp do_collect({:list, elements, _type}, target, uri, acc) do
-    Enum.reduce(elements, acc, &do_collect(&1, target, uri, &2))
-  end
-
-  # Tuple
-  defp do_collect({:tuple, elements, _type}, target, uri, acc) do
-    Enum.reduce(elements, acc, &do_collect(&1, target, uri, &2))
-  end
-
-  # Anonymous function
-  defp do_collect({:fn, _params, body, _type}, target, uri, acc) do
-    do_collect(body, target, uri, acc)
-  end
-
-  # Sum type variants
-  defp do_collect({:sum, variants}, target, _uri, acc) do
-    Enum.reduce(variants, acc, fn {ctor_name, _args}, a ->
-      if ctor_name == target do
-        a  # Would need location info
-      else
-        a
-      end
-    end)
-  end
-
-  # Literals - no symbols to find
-  defp do_collect({:lit, _, _}, _target, _uri, acc), do: acc
-
-  # Lists and other collections in raw AST
-  defp do_collect(list, target, uri, acc) when is_list(list) do
-    Enum.reduce(list, acc, &do_collect(&1, target, uri, &2))
-  end
-
-  # Tuples in raw AST
-  defp do_collect(tuple, target, uri, acc) when is_tuple(tuple) do
-    tuple
-    |> Tuple.to_list()
-    |> Enum.reduce(acc, &do_collect(&1, target, uri, &2))
-  end
-
-  # Atoms, integers, etc - no children
-  defp do_collect(_other, _target, _uri, acc), do: acc
-
-  # ============================================================================
-  # Text-based Fallback
-  # ============================================================================
-
-  defp find_symbol_textually(text, symbol, uri) do
     lines = String.split(text, "\n")
     symbol_str = to_string(symbol)
 
@@ -351,27 +181,5 @@ defmodule Vaisto.LSP.References do
   defp valid_identifier?(name) do
     # Must start with letter or allowed symbol, followed by valid chars
     name =~ ~r/^[a-zA-Z_!?\-+*\/<>=][a-zA-Z0-9_!?\-+*\/<>=]*$/
-  end
-
-  defp make_location(uri, %Parser.Loc{} = loc, name) do
-    name_len = name |> to_string() |> String.length()
-    %{
-      "uri" => uri,
-      "range" => %{
-        "start" => %{"line" => loc.line - 1, "character" => loc.col - 1},
-        "end" => %{"line" => loc.line - 1, "character" => loc.col - 1 + name_len}
-      }
-    }
-  end
-
-  defp make_location(uri, _loc, _name) do
-    # Fallback for missing location info
-    %{
-      "uri" => uri,
-      "range" => %{
-        "start" => %{"line" => 0, "character" => 0},
-        "end" => %{"line" => 0, "character" => 0}
-      }
-    }
   end
 end

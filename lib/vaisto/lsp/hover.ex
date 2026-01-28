@@ -359,10 +359,11 @@ defmodule Vaisto.LSP.Hover do
   end
 
   defp search_local_in_form({:fn, params, body, _loc}, name) do
-    # Anonymous functions - params are just atoms
+    # Anonymous functions - params are just atoms without location info
+    # Go-to-definition for fn params would require parser changes
     case Enum.find_index(params, &(&1 == name)) do
       nil -> search_local_in_expr(body, name)
-      _idx -> :not_found  # TODO: track param locations in fn
+      _idx -> :not_found
     end
   end
 

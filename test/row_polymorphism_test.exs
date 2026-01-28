@@ -27,11 +27,52 @@ defmodule Vaisto.RowPolymorphismTest do
       {:ok, _type, _typed_ast} = TypeChecker.check(ast)
     end
 
-    test "field access on unknown type returns any" do
+    test "field access on unknown type returns type variable" do
       code = "(defn get-x [r] (. r :x))"
       ast = Parser.parse(code)
-      # Should type check - we just don't know the exact type
-      {:ok, _type, _typed_ast} = TypeChecker.check(ast)
+      # Should type check and infer a type variable for the field
+      {:ok, func_type, _typed_ast} = TypeChecker.check(ast)
+
+      # The function type should have a type variable return type (not :any)
+      assert {:fn, [_param_type], ret_type} = func_type
+      assert match?({:tvar, _}, ret_type)
+    end
+
+    test "field access on unknown type includes row constraint in AST" do
+      code = "(defn get-x [r] (. r :x))"
+      ast = Parser.parse(code)
+      {:ok, _type, typed_ast} = TypeChecker.check(ast)
+
+      # The typed AST should include the row constraint
+      {:defn, :"get-x", [:r], body, _func_type} = typed_ast
+      # Body should be field_access with 5 elements (including row constraint)
+      assert {:field_access, _record, :x, field_type, row_constraint} = body
+      assert match?({:tvar, _}, field_type)
+      assert match?({:row, [{:x, {:tvar, _}}], {:rvar, _}}, row_constraint)
+    end
+
+    test "multiple field accesses on same unknown type get same field type" do
+      code = """
+      (defn sum-x [r1 r2] (+ (. r1 :x) (. r2 :x)))
+      """
+      ast = Parser.parse(code)
+      {:ok, _type, typed_ast} = TypeChecker.check(ast)
+
+      # Extract the two field accesses from the + call body
+      {:defn, :"sum-x", [:r1, :r2], body, _} = typed_ast
+      {:call, :+, [field1, field2], _} = body
+
+      # Both should have the same tvar ID for field :x
+      {:field_access, _, :x, type1, _} = field1
+      {:field_access, _, :x, type2, _} = field2
+
+      # Same field name should produce same type variable ID
+      assert {:tvar, id1} = type1
+      assert {:tvar, id2} = type2
+      # When both records have type :any, they share the same base ID
+      # So accessing the same field produces the same type variable
+      # This is semantically correct: both must have field :x of compatible types
+      assert id1 == id2
     end
   end
 

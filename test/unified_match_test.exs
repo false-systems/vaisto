@@ -210,15 +210,48 @@ defmodule Vaisto.UnifiedMatchTest do
 
   describe "unified match: exhaustiveness" do
     @tag :unified_match
-    @tag :skip  # Enable when exhaustiveness checking for tuples is implemented
-    test "warns on non-exhaustive tuple match" do
+    test "errors on non-exhaustive result-like tuple match" do
       code = """
       (match {:ok 1}
         [{:ok v} v])
       """
-      # Should warn: no pattern for other tuple shapes
-      # For now, we just test it compiles (wildcard not required for raw tuples)
-      assert run(code, UnifiedExhaust1) == 1
+      # Should error: {:ok ...} without {:error ...} pattern
+      ast = Parser.parse(code)
+      assert {:error, msg} = TypeChecker.check(ast)
+      assert msg =~ "Non-exhaustive pattern match"
+      assert msg =~ ":error"
+    end
+
+    @tag :unified_match
+    test "allows exhaustive result-like tuple match" do
+      code = """
+      (match {:ok 42}
+        [{:ok v} v]
+        [{:error _} 0])
+      """
+      # Covers both :ok and :error - should compile
+      assert run(code, UnifiedExhaust2) == 42
+    end
+
+    @tag :unified_match
+    test "allows non-result tuple match without catch-all" do
+      code = """
+      (match {:point 10 20}
+        [{:point x y} (+ x y)])
+      """
+      # :point is not a result-like tag, so no :error required
+      assert run(code, UnifiedExhaust3) == 30
+    end
+
+    @tag :unified_match
+    test "allows result tuple match with catch-all" do
+      code = """
+      (match {:ok 42}
+        [{:ok v} v]
+        [_ 0])
+      """
+      # Has catch-all pattern, so :error not required
+      assert run(code, UnifiedExhaust4) == 42
     end
   end
 

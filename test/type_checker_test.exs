@@ -30,8 +30,18 @@ defmodule Vaisto.TypeCheckerTest do
   end
 
   describe "supervision" do
-    test "valid strategy passes" do
+    test ":one_for_one strategy passes" do
       ast = {:supervise, :one_for_one, []}
+      assert {:ok, :supervisor, _} = TypeChecker.check(ast)
+    end
+
+    test ":all_for_one strategy passes" do
+      ast = {:supervise, :all_for_one, []}
+      assert {:ok, :supervisor, _} = TypeChecker.check(ast)
+    end
+
+    test ":rest_for_one strategy passes" do
+      ast = {:supervise, :rest_for_one, []}
       assert {:ok, :supervisor, _} = TypeChecker.check(ast)
     end
 

@@ -240,6 +240,16 @@ defmodule Vaisto.TypeChecker do
 
   # Field access with row polymorphism: (. record :field) → field_type
   # Works with records, row types, and creates row constraints
+  #
+  # Row polymorphism allows functions to accept any record with at least
+  # certain fields. For example:
+  #   (defn get-name [r] (. r :name))
+  # accepts any record with a :name field.
+  #
+  # When the record type is unknown (type variable or open row), we create
+  # fresh type variables for the field type and row constraint. These are
+  # deterministic based on the input IDs to ensure consistent types across
+  # multiple accesses to the same field.
   def check({:field_access, record_expr, field}, env) when is_atom(field) do
     with {:ok, record_type, typed_record} <- check(record_expr, env) do
       case record_type do
@@ -256,7 +266,7 @@ defmodule Vaisto.TypeChecker do
               )}
           end
 
-        # Row type - look up in known fields or constrain
+        # Row type - look up in known fields or constrain the tail
         {:row, fields, tail} ->
           case List.keyfind(fields, field, 0) do
             {^field, field_type} ->
@@ -270,26 +280,43 @@ defmodule Vaisto.TypeChecker do
                     record_type,
                     note: "closed row does not have field `#{field}`"
                   )}
-                {:rvar, id} ->
-                  # Create a new row type that includes this field
-                  # The field type is a fresh type variable (approximated as :any for now)
-                  # This at least tracks that the row must have this field
-                  # Note: In a full HM implementation, we'd unify this constraint
-                  _new_row = {:row, [{field, :any} | fields], {:rvar, id + 1}}
-                  {:ok, :any, {:field_access, typed_record, field, :any}}
+                {:rvar, row_id} ->
+                  # Create fresh type variable for the field type
+                  # Use deterministic ID based on row_id and field name for consistency
+                  field_tvar_id = fresh_field_tvar_id(row_id, field)
+                  field_type = {:tvar, field_tvar_id}
+
+                  # The row constraint: this row must have field => field_type
+                  # plus whatever else the tail requires
+                  row_constraint = {:row, [{field, field_type} | fields], {:rvar, row_id + 1}}
+
+                  # Return the field type variable with row constraint in AST
+                  {:ok, field_type, {:field_access, typed_record, field, field_type, row_constraint}}
               end
           end
 
         # Type variable - convert to row type constraint
-        {:tvar, id} ->
+        {:tvar, tvar_id} ->
           # The record has an unknown type - constrain it to be a row with this field
-          # Create a row type: {field => 'a | 'r} where 'a and 'r are fresh
-          # Note: In a full HM implementation, we'd unify tvar with this row type
-          _row_type = {:row, [{field, :any}], {:rvar, id}}
-          {:ok, :any, {:field_access, typed_record, field, :any}}
+          # Create fresh type variables for field type and row tail
+          field_tvar_id = fresh_field_tvar_id(tvar_id, field)
+          field_type = {:tvar, field_tvar_id}
+
+          # Row constraint: tvar must be a row with at least this field
+          row_constraint = {:row, [{field, field_type}], {:rvar, tvar_id}}
+
+          {:ok, field_type, {:field_access, typed_record, field, field_type, row_constraint}}
 
         :any ->
-          {:ok, :any, {:field_access, typed_record, field, :any}}
+          # Treat :any as an open row type - enables row polymorphism for untyped params
+          # Use a large base ID (2_000_000) to avoid collisions with regular tvars
+          field_tvar_id = fresh_field_tvar_id(2_000_000, field)
+          field_type = {:tvar, field_tvar_id}
+
+          # Row constraint: any must be a row with at least this field
+          row_constraint = {:row, [{field, field_type}], {:rvar, 2_000_000}}
+
+          {:ok, field_type, {:field_access, typed_record, field, field_type, row_constraint}}
 
         other ->
           {:error, Errors.type_mismatch(
@@ -299,6 +326,16 @@ defmodule Vaisto.TypeChecker do
           )}
       end
     end
+  end
+
+  # Generate a deterministic type variable ID for a field access
+  # This ensures that accessing the same field on the same row variable
+  # produces the same type variable, enabling proper constraint solving
+  defp fresh_field_tvar_id(base_id, field) do
+    # Use a large offset plus hash to avoid collisions with user-defined tvars
+    # The hash ensures different fields get different IDs
+    field_hash = :erlang.phash2(field, 1000)
+    1_000_000 + base_id * 1000 + field_hash
   end
 
   # Special form: spawn - returns a typed PID
@@ -1265,13 +1302,54 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
+  # For :any type with tuple patterns, check for non-exhaustive result-like matches
+  # Only error on clearly incomplete patterns like matching {:ok v} without {:error e}
+  # Other single-pattern tuple matches (like {:point x y}) are allowed
+  defp check_exhaustiveness(clauses, :any) do
+    has_catch_all = Enum.any?(clauses, fn {pattern, _body} ->
+      is_catch_all_pattern?(pattern)
+    end)
+
+    if has_catch_all do
+      :ok
+    else
+      # Check for result-like patterns: {:ok ...} without {:error ...} or vice versa
+      tags = clauses
+        |> Enum.map(fn {pattern, _body} -> extract_tuple_tag(pattern) end)
+        |> Enum.filter(&(&1 != nil))
+        |> MapSet.new()
+
+      result_tags = MapSet.new([:ok, :error])
+      has_result_tags = not MapSet.disjoint?(tags, result_tags)
+      missing_result_tags = MapSet.difference(result_tags, tags)
+
+      # Only error if using result-like tags without covering both
+      if has_result_tags and MapSet.size(missing_result_tags) > 0 do
+        missing_str = missing_result_tags |> MapSet.to_list() |> Enum.map(&":#{&1}") |> Enum.join(", ")
+        {:error, "Non-exhaustive pattern match on result tuple. Missing patterns for: #{missing_str}"}
+      else
+        :ok
+      end
+    end
+  end
+
   # Non-sum types don't need exhaustiveness checking (for now)
   defp check_exhaustiveness(_clauses, _expr_type), do: :ok
-
   # Extract variant constructor name from pattern
   defp extract_variant_name({:call, name, _, _}), do: name
   defp extract_variant_name({:pattern, name, _, _}), do: name
   defp extract_variant_name(_), do: nil
+
+  # Extract tag (first element) from tuple pattern
+  # Parser produces: {:atom, :ok} for atom literals
+  # TypeChecker produces: {:lit, :atom, :ok} for typed literals
+  defp extract_tuple_tag({:tuple, [{:lit, :atom, tag} | _], _}) when is_atom(tag), do: tag
+  defp extract_tuple_tag({:tuple, [{:atom, tag} | _], _}) when is_atom(tag), do: tag
+  defp extract_tuple_tag({:tuple, [tag | _], _}) when is_atom(tag), do: tag
+  defp extract_tuple_tag({:tuple_pattern, [{:lit, :atom, tag} | _]}) when is_atom(tag), do: tag
+  defp extract_tuple_tag({:tuple_pattern, [{:atom, tag} | _]}) when is_atom(tag), do: tag
+  defp extract_tuple_tag({:tuple_pattern, [tag | _]}) when is_atom(tag), do: tag
+  defp extract_tuple_tag(_), do: nil
 
   # Check if pattern is a catch-all (matches anything)
   defp is_catch_all_pattern?(:_), do: true
