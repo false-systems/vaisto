@@ -173,10 +173,13 @@
 (extern binary/split [:string :string] (List :string))
 
 ; Read file as list of lines
+; Split binary on all occurrences of pattern
+(extern binary/split [:string :string (List :atom)] (List :string))
+
 ; (read-lines "path") -> (Ok ["line1" "line2" ...]) | (Err reason)
 (defn read-lines [path]
   (match (read-file path)
-    [(Ok contents) (Ok (binary/split contents "\n"))]
+    [(Ok contents) (Ok (binary/split contents "\n" (list :global)))]
     [(Err e) (Err e)]))
 
 ; --- Temporary Files ---

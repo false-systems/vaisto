@@ -58,9 +58,10 @@
     [(None) false]))
 
 ; --- Erlang Interop Helpers ---
-; Convert Erlang {:ok, v} / {:error, e} to Result
+; Convert Erlang {:ok, v} / {:error, e} / :ok to Result
 (defn from-erlang-result [tuple]
   (match tuple
+    [:ok (Ok :ok)]
     [{:ok v} (Ok v)]
     [{:error e} (Err e)]))
 
