@@ -1,0 +1,31 @@
+; Word counter - counts words, lines, chars in a file
+(ns WordCount)
+
+(import Std.File)
+(import Std.List)
+(import Std.String)
+
+; Erlang string split with global option
+(extern binary/split [:string :string (List :atom)] (List :string))
+
+(defn split-all [text delim]
+  (binary/split text delim (list :global)))
+
+; Count words in a string (split by spaces)
+(defn count-words [text]
+  (Std.List/length (split-all text " ")))
+
+; Main
+(defn main []
+  (match (Std.File/read-file "examples/WordCount.va")
+    [(Ok contents)
+      (let [lines (Std.List/length (split-all contents "\n"))
+            words (count-words contents)
+            chars (Std.String/length contents)]
+        (do
+          (println "File: examples/WordCount.va")
+          (println (str "Lines: " (str lines)))
+          (println (str "Words: " (str words)))
+          (println (str "Chars: " (str chars)))))]
+    [(Err e)
+      (println "Error reading file")]))
