@@ -185,6 +185,9 @@ defmodule Vaisto.LSP.Handler do
 
       {:error, %Vaisto.Error{} = error} ->
         [Protocol.diagnostic(error, text)]
+
+      {:errors, errors} when is_list(errors) ->
+        Enum.map(errors, &Protocol.diagnostic(&1, text))
     end
 
     new_diagnostics = Map.put(state.diagnostics, uri, diagnostics)
