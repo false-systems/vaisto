@@ -269,8 +269,8 @@ defmodule Vaisto.REPL do
 
   defp compile_and_run(ast, module_name) do
     with {:ok, _type, typed_ast} <- Vaisto.TypeChecker.check(ast),
-         # Use CoreEmitter for consistency with compiled code
-         {:ok, ^module_name, _binary} <- Vaisto.CoreEmitter.compile(typed_ast, module_name) do
+         # Use Core backend for consistency with compiled code
+         {:ok, ^module_name, _binary} <- Vaisto.Backend.Core.compile(typed_ast, module_name) do
       result = apply(module_name, :main, [])
       # Clean up
       :code.purge(module_name)

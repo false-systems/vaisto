@@ -211,8 +211,8 @@ defmodule Vaisto.Runner do
 
   defp emit(typed_ast, module_name, backend) do
     case backend do
-      :core -> Vaisto.CoreEmitter.compile(typed_ast, module_name)
-      :elixir -> Vaisto.Emitter.compile(typed_ast, module_name)
+      :core -> Vaisto.Backend.Core.compile(typed_ast, module_name)
+      :elixir -> Vaisto.Backend.Elixir.compile(typed_ast, module_name)
       other -> {:error, Vaisto.Error.new("unknown backend",
         note: "#{inspect(other)} is not valid",
         hint: "use :core or :elixir"

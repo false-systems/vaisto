@@ -12,7 +12,7 @@ defmodule Vaisto.CLI do
   The standard prelude (Result, Option types) is automatically included.
   """
 
-  alias Vaisto.{Parser, TypeChecker, Emitter, CoreEmitter}
+  alias Vaisto.{Parser, TypeChecker, Backend}
 
   # Embed the prelude at compile time
   @external_resource Path.join(__DIR__, "../../std/prelude.va")
@@ -205,8 +205,8 @@ defmodule Vaisto.CLI do
     with {:ok, ast} <- parse(full_source),
          {:ok, _type, typed_ast} <- TypeChecker.check_with_source(ast, full_source) do
       case backend do
-        :core -> CoreEmitter.compile(typed_ast, module_name)
-        :elixir -> Emitter.compile(typed_ast, module_name)
+        :core -> Backend.Core.compile(typed_ast, module_name)
+        :elixir -> Backend.Elixir.compile(typed_ast, module_name)
         {:error, msg} -> {:error, msg}
       end
     end

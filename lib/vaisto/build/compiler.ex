@@ -19,7 +19,7 @@ defmodule Vaisto.Build.Compiler do
       }}
   """
 
-  alias Vaisto.{Parser, TypeChecker, CoreEmitter, Emitter, Interface}
+  alias Vaisto.{Parser, TypeChecker, Backend, Interface}
   alias Vaisto.Build.ModuleNaming
 
   @type compilation_result :: %{
@@ -159,14 +159,14 @@ defmodule Vaisto.Build.Compiler do
   end
 
   defp emit(typed_ast, module_name, :core) do
-    case CoreEmitter.compile(typed_ast, module_name, load: false) do
+    case Backend.Core.compile(typed_ast, module_name, load: false) do
       {:ok, _mod, bytecode} -> {:ok, bytecode}
       {:error, reason} -> {:error, "Compilation error: #{reason}"}
     end
   end
 
   defp emit(typed_ast, module_name, :elixir) do
-    case Emitter.compile(typed_ast, module_name) do
+    case Backend.Elixir.compile(typed_ast, module_name) do
       {:ok, _mod, bytecode} -> {:ok, bytecode}
       {:error, reason} -> {:error, "Compilation error: #{reason}"}
     end

@@ -6,7 +6,7 @@ defmodule Vaisto do
   when the right structure becomes visible.
   """
 
-  alias Vaisto.{Parser, TypeChecker, CoreEmitter}
+  alias Vaisto.{Parser, TypeChecker, Backend}
 
   @doc """
   Compile a .va file to BEAM bytecode.
@@ -27,7 +27,7 @@ defmodule Vaisto do
       |> Parser.parse()
       |> TypeChecker.check!()
 
-    CoreEmitter.compile(typed_ast, module_name)
+    Backend.Core.compile(typed_ast, module_name)
   end
 
   @doc """
