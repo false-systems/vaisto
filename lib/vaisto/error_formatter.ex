@@ -28,17 +28,31 @@ defmodule Vaisto.ErrorFormatter do
 
   @doc """
   Formats a structured Vaisto.Error with source context.
+
+  ## Options
+
+    * `:line_offset` - Number of lines to subtract from error line numbers
+      (useful when source has a prelude prepended). Default: 0
+    * `:source_offset` - Number of lines to skip in source when showing context.
+      Default: same as `:line_offset`
   """
-  @spec format(Error.t() | legacy_error(), String.t()) :: String.t()
-  def format(%Error{} = error, source) do
-    lines = String.split(source, "\n")
+  @spec format(Error.t() | legacy_error(), String.t(), keyword()) :: String.t()
+  def format(error, source, opts \\ [])
+
+  def format(%Error{} = error, source, opts) do
+    line_offset = Keyword.get(opts, :line_offset, 0)
+    source_offset = Keyword.get(opts, :source_offset, line_offset)
+
+    # Adjust error line numbers and use only user source for context
+    adjusted_error = adjust_line_numbers(error, line_offset)
+    user_source_lines = source |> String.split("\n") |> Enum.drop(source_offset)
 
     [
-      format_header(error),
-      format_location(error),
-      format_source_context(error, lines),
-      format_note(error),
-      format_hint(error)
+      format_header(adjusted_error),
+      format_location(adjusted_error),
+      format_source_context(adjusted_error, user_source_lines),
+      format_note(adjusted_error),
+      format_hint(adjusted_error)
     ]
     |> List.flatten()
     |> Enum.reject(&is_nil/1)
@@ -46,27 +60,46 @@ defmodule Vaisto.ErrorFormatter do
   end
 
   # Legacy map format for backwards compatibility
-  def format(%{message: _, line: _, col: _} = error, source) do
-    format_legacy(error, source)
+  def format(%{message: _, line: _, col: _} = error, source, opts) do
+    line_offset = Keyword.get(opts, :line_offset, 0)
+    adjusted_error = %{error | line: error.line - line_offset}
+    source_offset = Keyword.get(opts, :source_offset, line_offset)
+    user_source_lines = source |> String.split("\n") |> Enum.drop(source_offset) |> Enum.join("\n")
+    format_legacy(adjusted_error, user_source_lines)
   end
 
   # Plain string error - try to parse or return as-is
-  def format(error, source) when is_binary(error) do
+  def format(error, source, opts) when is_binary(error) do
     case parse_legacy_error(error) do
       nil -> error
-      parsed -> format_legacy(parsed, source)
+      parsed -> format(parsed, source, opts)
     end
   end
 
   @doc """
   Formats multiple errors with source context.
+
+  ## Options
+
+  Same as `format/3`.
   """
-  @spec format_all([Error.t() | legacy_error()], String.t()) :: String.t()
-  def format_all(errors, source) do
+  @spec format_all([Error.t() | legacy_error()], String.t(), keyword()) :: String.t()
+  def format_all(errors, source, opts \\ []) do
     errors
-    |> Enum.map(&format(&1, source))
+    |> Enum.map(&format(&1, source, opts))
     |> Enum.join("\n\n")
   end
+
+  # Adjust line numbers in an error by subtracting offset
+  defp adjust_line_numbers(%Error{primary_span: nil} = error, _offset), do: error
+  defp adjust_line_numbers(%Error{primary_span: span} = error, offset) when offset > 0 do
+    adjusted_span = %{span | line: span.line - offset}
+    adjusted_secondary = Enum.map(error.secondary_spans, fn s ->
+      %{s | line: s.line - offset}
+    end)
+    %{error | primary_span: adjusted_span, secondary_spans: adjusted_secondary}
+  end
+  defp adjust_line_numbers(error, _offset), do: error
 
   @doc """
   Parses a legacy error string like "file:line:col: message" into structured format.

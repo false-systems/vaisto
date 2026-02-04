@@ -17,6 +17,10 @@ defmodule Vaisto.CLI do
   # Embed the prelude at compile time
   @external_resource Path.join(__DIR__, "../../std/prelude.va")
   @prelude File.read!(Path.join(__DIR__, "../../std/prelude.va"))
+  # Prelude line count for error offset
+  # We join with "\n\n", adding 2 newlines between prelude and user code
+  # User line 1 starts after: prelude lines + separator newlines
+  @prelude_line_count length(String.split(@prelude, "\n")) + 1
 
   def main(args) do
     case parse_args(args) do
@@ -203,12 +207,28 @@ defmodule Vaisto.CLI do
     full_source = @prelude <> "\n\n" <> source
 
     with {:ok, ast} <- parse(full_source),
-         {:ok, _type, typed_ast} <- TypeChecker.check_with_source(ast, full_source) do
+         {:ok, _type, typed_ast} <- check_with_offset(ast, full_source) do
       case backend do
         :core -> Backend.Core.compile(typed_ast, module_name)
         :elixir -> Backend.Elixir.compile(typed_ast, module_name)
         {:error, msg} -> {:error, msg}
       end
+    end
+  end
+
+  # Type check and format errors with prelude line offset
+  defp check_with_offset(ast, full_source) do
+    case TypeChecker.check(ast) do
+      {:ok, _, _} = success ->
+        success
+      {:errors, errors} ->
+        formatted = Vaisto.ErrorFormatter.format_all(errors, full_source, line_offset: @prelude_line_count)
+        {:error, formatted}
+      {:error, %Vaisto.Error{} = error} ->
+        formatted = Vaisto.ErrorFormatter.format(error, full_source, line_offset: @prelude_line_count)
+        {:error, formatted}
+      {:error, msg} when is_binary(msg) ->
+        {:error, msg}
     end
   end
 

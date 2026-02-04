@@ -703,7 +703,7 @@ defmodule Vaisto.TypeChecker do
   def check({:call, func, args}, env) when is_atom(func) do
     with {:ok, func_type} <- lookup_function(func, env),
          {:ok, arg_types, typed_args} <- check_args(args, env),
-         {:ok, ret_type} <- unify_call(func_type, arg_types) do
+         {:ok, ret_type} <- unify_call(func_type, arg_types, args) do
       # Check if this is a local variable (function parameter or let-binding)
       # vs a module-level defn. Local vars have {:fn, ...} type directly in env.
       # We check if it's a "local" by seeing if it came from :__local_vars__
@@ -720,7 +720,7 @@ defmodule Vaisto.TypeChecker do
   def check({:call, func, args}, env) do
     with {:ok, func_type} <- lookup_function(func, env),
          {:ok, arg_types, typed_args} <- check_args(args, env),
-         {:ok, ret_type} <- unify_call(func_type, arg_types) do
+         {:ok, ret_type} <- unify_call(func_type, arg_types, args) do
       {:ok, ret_type, {:call, func, typed_args, ret_type}}
     end
   end
@@ -1718,29 +1718,48 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
-  defp unify_call({:fn, expected_args, ret_type}, actual_args) do
+  # Header clause to define default for original_args
+  defp unify_call(func_type, actual_args, original_args \\ [])
+
+  defp unify_call({:fn, expected_args, ret_type}, actual_args, original_args) do
     if length(expected_args) != length(actual_args) do
       {:error, Errors.arity_mismatch(:function, length(expected_args), length(actual_args))}
     else
       mismatches =
-        Enum.zip(expected_args, actual_args)
+        Enum.zip([expected_args, actual_args, original_args ++ List.duplicate(nil, length(actual_args))])
         |> Enum.with_index()
-        |> Enum.filter(fn {{exp, act}, _} -> not types_match?(exp, act) end)
+        |> Enum.filter(fn {{exp, act, _}, _} -> not types_match?(exp, act) end)
 
       case mismatches do
         [] -> {:ok, ret_type}
-        [{{expected, actual}, idx} | _] ->
+        [{{expected, actual, orig_arg}, idx} | _] ->
+          # Extract location from original argument if available
+          span_opts = case extract_loc(orig_arg) do
+            nil -> []
+            loc -> [span: Error.span_from_loc(loc)]
+          end
           {:error, Errors.type_mismatch(expected, actual,
-            note: "at argument #{idx + 1}")}
+            Keyword.merge(span_opts, [note: "at argument #{idx + 1}"]))}
       end
     end
   end
 
   # When the function type is :any (untyped higher-order function parameter)
   # allow any arguments and return :any
-  defp unify_call(:any, _actual_args) do
+  defp unify_call(:any, _actual_args, _original_args) do
     {:ok, :any}
   end
+
+  # Extract location from AST node (location is always the last element of tuple AST nodes)
+  defp extract_loc(nil), do: nil
+  defp extract_loc(tuple) when is_tuple(tuple) do
+    last = elem(tuple, tuple_size(tuple) - 1)
+    case last do
+      %Vaisto.Parser.Loc{} = loc -> loc
+      _ -> nil
+    end
+  end
+  defp extract_loc(_), do: nil
 
   defp types_match?(:any, _), do: true
   defp types_match?(_, :any), do: true
