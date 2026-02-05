@@ -51,6 +51,7 @@ defmodule Vaisto.Error do
   @doc """
   Create a new error with the given message and options.
   """
+  @spec new(String.t(), keyword()) :: t()
   def new(message, opts \\ []) do
     %__MODULE__{
       message: message,
@@ -67,6 +68,8 @@ defmodule Vaisto.Error do
   @doc """
   Create a span from a Loc struct and optional length.
   """
+  @spec span_from_loc(Vaisto.Parser.Loc.t() | nil, pos_integer(), String.t() | nil) ::
+          span() | nil
   def span_from_loc(loc, length \\ 1, label \\ nil)
   def span_from_loc(nil, _length, _label), do: nil
   def span_from_loc(%Vaisto.Parser.Loc{} = loc, length, label) do
@@ -81,6 +84,7 @@ defmodule Vaisto.Error do
   @doc """
   Add a secondary span to an error.
   """
+  @spec add_span(t(), span()) :: t()
   def add_span(%__MODULE__{} = error, span) do
     %{error | secondary_spans: error.secondary_spans ++ [span]}
   end

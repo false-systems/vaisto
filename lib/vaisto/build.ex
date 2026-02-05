@@ -27,6 +27,9 @@ defmodule Vaisto.Build do
   alias Vaisto.Build.{ModuleNaming, DependencyResolver, Compiler}
   alias Vaisto.Interface
 
+  @type build_opts :: keyword()
+  @type build_result :: {:ok, [map()]} | {:error, term()}
+
   @doc """
   Build all .va files in a directory.
 
@@ -44,6 +47,7 @@ defmodule Vaisto.Build do
     * `{:ok, results}` - list of compilation results
     * `{:error, reason}` - build error
   """
+  @spec build(String.t(), build_opts()) :: build_result()
   def build(source_dir, opts \\ []) do
     output_dir = Keyword.get(opts, :output_dir, source_dir)
     source_roots = Keyword.get(opts, :source_roots, ModuleNaming.default_source_roots())
@@ -72,6 +76,7 @@ defmodule Vaisto.Build do
     * `{:ok, result}` - compilation result
     * `{:error, reason}` - compilation error
   """
+  @spec compile_file(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def compile_file(source_path, import_env, opts \\ []) do
     Compiler.compile(source_path, import_env, opts)
   end
@@ -89,6 +94,7 @@ defmodule Vaisto.Build do
       iex> Vaisto.Build.infer_module_name("std/List.va")
       :"Elixir.Std.List"
   """
+  @spec infer_module_name(String.t(), [{String.t(), String.t()}]) :: atom()
   def infer_module_name(file_path, source_roots \\ ModuleNaming.default_source_roots()) do
     ModuleNaming.infer(file_path, source_roots: source_roots)
   end

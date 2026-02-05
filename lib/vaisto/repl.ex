@@ -56,6 +56,7 @@ defmodule Vaisto.REPL do
   @doc """
   Starts the interactive REPL.
   """
+  @spec start() :: :ok
   def start do
     IO.puts("Vaisto REPL v0.1 (Algorithm W)")
     IO.puts("Type :help for commands, :quit to exit\n")
