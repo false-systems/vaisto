@@ -59,6 +59,33 @@ defmodule Vaisto.CLI do
     parse_build_opts(rest, %{dir: ".", output: nil, backend: :core, src_roots: []})
   end
 
+  defp parse_args(["--eval", code]), do: {:eval, code, :core}
+  defp parse_args(["-e", code]), do: {:eval, code, :core}
+  defp parse_args(["--eval", code, "--backend", backend]), do: {:eval, code, parse_backend(backend)}
+  defp parse_args(["-e", code, "--backend", backend]), do: {:eval, code, parse_backend(backend)}
+
+  defp parse_args([input]) do
+    {:compile, input, default_output(input), :core}
+  end
+
+  defp parse_args([input, "-o", output]) do
+    {:compile, input, output, :core}
+  end
+
+  defp parse_args([input, "--backend", backend]) do
+    {:compile, input, default_output(input), parse_backend(backend)}
+  end
+
+  defp parse_args([input, "-o", output, "--backend", backend]) do
+    {:compile, input, output, parse_backend(backend)}
+  end
+
+  defp parse_args([input, "--backend", backend, "-o", output]) do
+    {:compile, input, output, parse_backend(backend)}
+  end
+
+  defp parse_args(_), do: {:error, "invalid arguments. Use --help for usage."}
+
   # Parse build command options
   defp parse_build_opts([], acc) do
     output = acc.output || acc.dir
@@ -89,33 +116,6 @@ defmodule Vaisto.CLI do
   defp parse_build_opts([dir | rest], acc) do
     parse_build_opts(rest, %{acc | dir: dir})
   end
-
-  defp parse_args(["--eval", code]), do: {:eval, code, :core}
-  defp parse_args(["-e", code]), do: {:eval, code, :core}
-  defp parse_args(["--eval", code, "--backend", backend]), do: {:eval, code, parse_backend(backend)}
-  defp parse_args(["-e", code, "--backend", backend]), do: {:eval, code, parse_backend(backend)}
-
-  defp parse_args([input]) do
-    {:compile, input, default_output(input), :core}
-  end
-
-  defp parse_args([input, "-o", output]) do
-    {:compile, input, output, :core}
-  end
-
-  defp parse_args([input, "--backend", backend]) do
-    {:compile, input, default_output(input), parse_backend(backend)}
-  end
-
-  defp parse_args([input, "-o", output, "--backend", backend]) do
-    {:compile, input, output, parse_backend(backend)}
-  end
-
-  defp parse_args([input, "--backend", backend, "-o", output]) do
-    {:compile, input, output, parse_backend(backend)}
-  end
-
-  defp parse_args(_), do: {:error, "invalid arguments. Use --help for usage."}
 
   defp parse_backend("core"), do: :core
   defp parse_backend("elixir"), do: :elixir

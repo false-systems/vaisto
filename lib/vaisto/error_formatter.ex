@@ -208,7 +208,6 @@ defmodule Vaisto.ErrorFormatter do
       true -> ""
     end
   end
-  defp build_label(%{label: label}, _error, :secondary) when is_binary(label), do: " #{label}"
   defp build_label(_span, _error, _type), do: ""
 
   # Format note section

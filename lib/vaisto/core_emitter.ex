@@ -82,6 +82,35 @@ defmodule Vaisto.CoreEmitter do
     end
   end
 
+  # Single defn → wrap in module and compile
+  def to_core({:defn, _, _, _, _} = defn, module_name) do
+    to_core({:module, [defn]}, module_name)
+  end
+
+  # Single defval → wrap in module and compile
+  def to_core({:defval, _, _, _} = defval, module_name) do
+    to_core({:module, [defval]}, module_name)
+  end
+
+  # Single deftype → wrap in module (generates constructor functions)
+  def to_core({:deftype, _, _, _} = deftype, module_name) do
+    to_core({:module, [deftype]}, module_name)
+  end
+
+  # Single expression → module with main/0
+  def to_core(typed_ast, module_name) do
+    main_body = to_core_expr(typed_ast)
+    main_fun = :cerl.c_fun([], main_body)
+    main_name = :cerl.c_fname(:main, 0)
+
+    :cerl.c_module(
+      :cerl.c_atom(module_name),
+      [main_name],
+      [],
+      [{main_name, main_fun}]
+    )
+  end
+
   defp to_core_module_forms(forms, module_name) do
     # Separate defn forms from other expressions
     {defns, exprs} = Enum.split_with(forms, fn
@@ -207,35 +236,6 @@ defmodule Vaisto.CoreEmitter do
       fun_exports ++ main_exports ++ ctor_exports,
       [],
       fun_defs ++ main_defs ++ constructor_fns
-    )
-  end
-
-  # Single defn → wrap in module and compile
-  def to_core({:defn, _, _, _, _} = defn, module_name) do
-    to_core({:module, [defn]}, module_name)
-  end
-
-  # Single defval → wrap in module and compile
-  def to_core({:defval, _, _, _} = defval, module_name) do
-    to_core({:module, [defval]}, module_name)
-  end
-
-  # Single deftype → wrap in module (generates constructor functions)
-  def to_core({:deftype, _, _, _} = deftype, module_name) do
-    to_core({:module, [deftype]}, module_name)
-  end
-
-  # Single expression → module with main/0
-  def to_core(typed_ast, module_name) do
-    main_body = to_core_expr(typed_ast)
-    main_fun = :cerl.c_fun([], main_body)
-    main_name = :cerl.c_fname(:main, 0)
-
-    :cerl.c_module(
-      :cerl.c_atom(module_name),
-      [main_name],
-      [],
-      [{main_name, main_fun}]
     )
   end
 

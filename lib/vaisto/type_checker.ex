@@ -9,27 +9,17 @@ defmodule Vaisto.TypeChecker do
 
   alias Vaisto.Error
   alias Vaisto.Errors
+  alias Vaisto.TypeEnv
 
-  # Built-in type environment
+  # Use TypeEnv for built-in primitives
   # Note: spawn and send (!) are handled specially for typed PIDs
   # Note: head, tail, cons, map, filter, fold are handled specially for list types
-  @primitives %{
-    :+ => {:fn, [:int, :int], :int},
-    :- => {:fn, [:int, :int], :int},
-    :* => {:fn, [:int, :int], :int},
-    :/ => {:fn, [:int, :int], :int},
-    :== => {:fn, [:any, :any], :bool},
-    :< => {:fn, [:int, :int], :bool},
-    :> => {:fn, [:int, :int], :bool},
-    :<= => {:fn, [:int, :int], :bool},
-    :>= => {:fn, [:int, :int], :bool},
-    :!= => {:fn, [:any, :any], :bool}
-  }
+  @primitives TypeEnv.primitives()
 
   @doc """
   Return the built-in primitives type environment.
   """
-  def primitives, do: @primitives
+  def primitives, do: TypeEnv.primitives()
 
   @doc """
   Check types and return the result type. Raises on error.
@@ -113,6 +103,42 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
+  # Literals (non-tuple primitives)
+  def check(n, _env) when is_integer(n), do: {:ok, :int, {:lit, :int, n}}
+  def check(f, _env) when is_float(f), do: {:ok, :float, {:lit, :float, f}}
+  def check(true, _env), do: {:ok, :bool, {:lit, :bool, true}}
+  def check(false, _env), do: {:ok, :bool, {:lit, :bool, false}}
+
+  # Atoms - could be message types OR variable references
+  # If it's in the env (like :state in a handler), it's a variable
+  def check(a, env) when is_atom(a) do
+    case Map.get(env, a) do
+      nil ->
+        {:ok, {:atom, a}, {:lit, :atom, a}}
+
+      {:fn, params, _ret} = type ->
+        # Function type - check if it's local or module-level
+        if is_local_var?(a, env) do
+          {:ok, type, {:var, a, type}}
+        else
+          # Module-level function - emit fn_ref so emitter can use &name/arity
+          {:ok, type, {:fn_ref, a, length(params), type}}
+        end
+
+      type ->
+        {:ok, type, {:var, a, type}}
+    end
+  end
+
+  # Fallback for unrecognized expressions
+  def check(other, _env) do
+    {:error, Errors.unknown_expression(other)}
+  end
+
+  # ============================================================================
+  # Private implementation clauses (check_impl) for tuple AST nodes
+  # ============================================================================
+
   # Delegate tuple patterns and tuples to their handlers
   defp check_impl({:tuple_pattern, elements}, env), do: check_tuple_expr(elements, env)
   defp check_impl({:map, pairs}, env), do: check_map_literal(pairs, env)
@@ -150,11 +176,7 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
-  # Literals
-  def check(n, _env) when is_integer(n), do: {:ok, :int, {:lit, :int, n}}
-  def check(f, _env) when is_float(f), do: {:ok, :float, {:lit, :float, f}}
-  def check(true, _env), do: {:ok, :bool, {:lit, :bool, true}}
-  def check(false, _env), do: {:ok, :bool, {:lit, :bool, false}}
+  # String and unit literals (tuple forms)
   defp check_impl({:string, s}, _env), do: {:ok, :string, {:lit, :string, s}}
   defp check_impl({:unit, _loc}, _env), do: {:ok, :unit, {:lit, :unit, nil}}
   defp check_impl({:unit}, _env), do: {:ok, :unit, {:lit, :unit, nil}}
@@ -184,27 +206,6 @@ defmodule Vaisto.TypeChecker do
   # This is always a literal, never a variable lookup
   defp check_impl({:atom, a}, _env) when is_atom(a) do
     {:ok, {:atom, a}, {:lit, :atom, a}}
-  end
-
-  # Atoms - could be message types OR variable references
-  # If it's in the env (like :state in a handler), it's a variable
-  def check(a, env) when is_atom(a) do
-    case Map.get(env, a) do
-      nil ->
-        {:ok, {:atom, a}, {:lit, :atom, a}}
-
-      {:fn, params, _ret} = type ->
-        # Function type - check if it's local or module-level
-        if is_local_var?(a, env) do
-          {:ok, type, {:var, a, type}}
-        else
-          # Module-level function - emit fn_ref so emitter can use &name/arity
-          {:ok, type, {:fn_ref, a, length(params), type}}
-        end
-
-      type ->
-        {:ok, type, {:var, a, type}}
-    end
   end
 
   # Variable lookup
@@ -316,16 +317,6 @@ defmodule Vaisto.TypeChecker do
           )}
       end
     end
-  end
-
-  # Generate a deterministic type variable ID for a field access
-  # This ensures that accessing the same field on the same row variable
-  # produces the same type variable, enabling proper constraint solving
-  defp fresh_field_tvar_id(base_id, field) do
-    # Use a large offset plus hash to avoid collisions with user-defined tvars
-    # The hash ensures different fields get different IDs
-    field_hash = :erlang.phash2(field, 1000)
-    1_000_000 + base_id * 1000 + field_hash
   end
 
   # Special form: spawn - returns a typed PID
@@ -942,11 +933,6 @@ defmodule Vaisto.TypeChecker do
     {:error, Errors.parse_error(msg)}
   end
 
-  # Fallback
-  def check(other, _env) do
-    {:error, Errors.unknown_expression(other)}
-  end
-
   # Parse type expressions from extern declarations and type annotations
   # Atom-wrapped type from parser: {:atom, :int} → :int
   defp parse_type_expr({:atom, t}) when is_atom(t), do: t
@@ -958,6 +944,16 @@ defmodule Vaisto.TypeChecker do
   defp parse_type_expr({:call, :List, [elem_type], _loc}), do: {:list, parse_type_expr(elem_type)}
   # Fallback
   defp parse_type_expr(other), do: other
+
+  # Generate a deterministic type variable ID for a field access
+  # This ensures that accessing the same field on the same row variable
+  # produces the same type variable, enabling proper constraint solving
+  defp fresh_field_tvar_id(base_id, field) do
+    # Use a large offset plus hash to avoid collisions with user-defined tvars
+    # The hash ensures different fields get different IDs
+    field_hash = :erlang.phash2(field, 1000)
+    1_000_000 + base_id * 1000 + field_hash
+  end
 
   # Strip location from fn AST nodes
   defp strip_fn_loc({:fn, params, body, %Vaisto.Parser.Loc{}}), do: {:fn, params, body}
