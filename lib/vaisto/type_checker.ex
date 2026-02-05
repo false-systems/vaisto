@@ -99,43 +99,30 @@ defmodule Vaisto.TypeChecker do
     check_module(forms, env, [])
   end
 
-  # Normalize AST nodes that have location metadata attached
-  # Strip location from tuples to allow pattern matching on the core AST shape
-  # Location is captured for error messages via with_loc/2
-  def check({:call, func, args, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:call, func, args}, env), loc)
-  def check({:if, cond, then_b, else_b, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:if, cond, then_b, else_b}, env), loc)
-  def check({:let, bindings, body, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:let, bindings, body}, env), loc)
-  def check({:match, expr, clauses, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:match, expr, clauses}, env), loc)
-  def check({:receive, clauses, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:receive, clauses}, env), loc)
-  def check({:process, name, init, handlers, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:process, name, init, handlers}, env), loc)
-  def check({:supervise, strategy, children, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:supervise, strategy, children}, env), loc)
-  def check({:def, name, args, body, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:def, name, args, body}, env), loc)
-  def check({:defval, name, value, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:defval, name, value}, env), loc)
-  def check({:defn, name, params, body, ret_type, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:defn, name, params, body, ret_type}, env), loc)
-  # Legacy 4-arg defn (for backwards compatibility)
-  def check({:defn, name, params, body, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:defn, name, params, body, :any}, env), loc)
-  def check({:defn_multi, name, clauses, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:defn_multi, name, clauses}, env), loc)
-  def check({:deftype, name, fields, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:deftype, name, fields}, env), loc)
-  def check({:fn, params, body, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:fn, params, body}, env), loc)
-  def check({:extern, mod, func, arg_types, ret_type, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:extern, mod, func, arg_types, ret_type}, env), loc)
-  def check({:list, elements, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:list, elements}, env), loc)
-  def check({:unit, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:unit}, env), loc)
-  def check({:tuple_pattern, elements}, env), do: check_tuple_expr(elements, env)
-  def check({:map, pairs, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:map, pairs}, env), loc)
-  def check({:map, pairs}, env), do: check_map_literal(pairs, env)
-  def check({:field_access, record, field, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:field_access, record, field}, env), loc)
-  def check({:ns, name, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:ns, name}, env), loc)
-  def check({:import, module, alias_name, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:import, module, alias_name}, env), loc)
-  def check({:do, exprs, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:do, exprs}, env), loc)
-  # Tuple expression: (tuple :tag a b) → {:tuple, [:tag, a, b], loc}
-  def check({:tuple, elements, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check_tuple_expr(elements, env), loc)
-  def check({:tuple, elements}, env), do: check_tuple_expr(elements, env)
+  # Generic location handling for all AST tuple nodes
+  # Strips Loc from any tuple and delegates to check_impl, wrapping result with location
+  # This replaces 27 individual boilerplate clauses
+  def check(node, env) when is_tuple(node) do
+    case Vaisto.LocationStripper.strip_node(node) do
+      {^node, nil} ->
+        # No Loc found, node unchanged - delegate to implementation
+        check_impl(node, env)
+      {stripped, %Vaisto.Parser.Loc{} = loc} ->
+        # Loc found and stripped - check stripped version and wrap result
+        with_loc(check(stripped, env), loc)
+    end
+  end
+
+  # Delegate tuple patterns and tuples to their handlers
+  defp check_impl({:tuple_pattern, elements}, env), do: check_tuple_expr(elements, env)
+  defp check_impl({:map, pairs}, env), do: check_map_literal(pairs, env)
+  defp check_impl({:tuple, elements}, env), do: check_tuple_expr(elements, env)
 
   # Bracket expressions: [] or [a b c] used as list literals
   # Empty bracket [] → empty list
-  def check({:bracket, []}, _env), do: {:ok, {:list, :any}, {:list, [], {:list, :any}}}
+  defp check_impl({:bracket, []}, _env), do: {:ok, {:list, :any}, {:list, [], {:list, :any}}}
   # Cons expression: [h | t] → creates a list by prepending h to t
-  def check({:bracket, {:cons, head, tail}}, env) do
+  defp check_impl({:bracket, {:cons, head, tail}}, env) do
     with {:ok, head_type, typed_head} <- check(head, env),
          {:ok, tail_type, typed_tail} <- check(tail, env) do
       # The result is a list containing head_type elements
@@ -148,14 +135,14 @@ defmodule Vaisto.TypeChecker do
   end
   # Non-empty bracket with cons pattern: [h | t] → this is a pattern, not an expression
   # (Should only appear in match clauses, not as standalone expression)
-  def check({:bracket, elements}, env) when is_list(elements) do
+  defp check_impl({:bracket, elements}, env) when is_list(elements) do
     # Treat as list literal: [1 2 3] → (list 1 2 3)
     check({:list, elements}, env)
   end
 
   # Do block: (do expr1 expr2 ...) → type of last expression
-  def check({:do, []}, _env), do: {:ok, :unit, {:do, [], :unit}}
-  def check({:do, exprs}, env) do
+  defp check_impl({:do, []}, _env), do: {:ok, :unit, {:do, [], :unit}}
+  defp check_impl({:do, exprs}, env) do
     case check_exprs_sequence(exprs, env) do
       {:ok, typed_exprs, last_type} ->
         {:ok, last_type, {:do, typed_exprs, last_type}}
@@ -168,13 +155,13 @@ defmodule Vaisto.TypeChecker do
   def check(f, _env) when is_float(f), do: {:ok, :float, {:lit, :float, f}}
   def check(true, _env), do: {:ok, :bool, {:lit, :bool, true}}
   def check(false, _env), do: {:ok, :bool, {:lit, :bool, false}}
-  def check({:string, s}, _env), do: {:ok, :string, {:lit, :string, s}}
-  def check({:unit, _loc}, _env), do: {:ok, :unit, {:lit, :unit, nil}}
-  def check({:unit}, _env), do: {:ok, :unit, {:lit, :unit, nil}}
+  defp check_impl({:string, s}, _env), do: {:ok, :string, {:lit, :string, s}}
+  defp check_impl({:unit, _loc}, _env), do: {:ok, :unit, {:lit, :unit, nil}}
+  defp check_impl({:unit}, _env), do: {:ok, :unit, {:lit, :unit, nil}}
 
   # List literal: (list 1 2 3) → homogeneous list
-  def check({:list, []}, _env), do: {:ok, {:list, :any}, {:list, [], {:list, :any}}}
-  def check({:list, elements}, env) do
+  defp check_impl({:list, []}, _env), do: {:ok, {:list, :any}, {:list, [], {:list, :any}}}
+  defp check_impl({:list, elements}, env) do
     case check_args(elements, env) do
       {:ok, types, typed_elements} ->
         # Infer element type from first element (lists are homogeneous)
@@ -195,7 +182,7 @@ defmodule Vaisto.TypeChecker do
 
   # Atom literal from parser: {:atom, :foo} → :foo
   # This is always a literal, never a variable lookup
-  def check({:atom, a}, _env) when is_atom(a) do
+  defp check_impl({:atom, a}, _env) when is_atom(a) do
     {:ok, {:atom, a}, {:lit, :atom, a}}
   end
 
@@ -222,7 +209,7 @@ defmodule Vaisto.TypeChecker do
 
   # Variable lookup
   # Distinguishes local variables from module-level function references
-  def check({:var, name}, env) do
+  defp check_impl({:var, name}, env) do
     case Map.get(env, name) do
       nil ->
         {:error, Errors.undefined_variable(name)}
@@ -253,7 +240,7 @@ defmodule Vaisto.TypeChecker do
   # fresh type variables for the field type and row constraint. These are
   # deterministic based on the input IDs to ensure consistent types across
   # multiple accesses to the same field.
-  def check({:field_access, record_expr, field}, env) when is_atom(field) do
+  defp check_impl({:field_access, record_expr, field}, env) when is_atom(field) do
     with {:ok, record_type, typed_record} <- check(record_expr, env) do
       case record_type do
         # Concrete record - look up field directly
@@ -343,7 +330,7 @@ defmodule Vaisto.TypeChecker do
 
   # Special form: spawn - returns a typed PID
   # (spawn process_name initial_state) → Pid<ProcessName>
-  def check({:call, :spawn, [process_name, init_state]}, env) do
+  defp check_impl({:call, :spawn, [process_name, init_state]}, env) do
     with {:ok, process_type} <- lookup_process(process_name, env),
          {:ok, _init_type, typed_init} <- check(init_state, env) do
       # Create typed PID that knows what messages this process accepts
@@ -356,7 +343,7 @@ defmodule Vaisto.TypeChecker do
   # --- List operations ---
 
   # head: (list a) → a
-  def check({:call, :head, [list_expr]}, env) do
+  defp check_impl({:call, :head, [list_expr]}, env) do
     with {:ok, list_type, typed_list} <- check(list_expr, env) do
       case list_type do
         {:list, elem_type} ->
@@ -370,7 +357,7 @@ defmodule Vaisto.TypeChecker do
   end
 
   # tail: (list a) → (list a)
-  def check({:call, :tail, [list_expr]}, env) do
+  defp check_impl({:call, :tail, [list_expr]}, env) do
     with {:ok, list_type, typed_list} <- check(list_expr, env) do
       case list_type do
         {:list, _elem_type} = t ->
@@ -384,7 +371,7 @@ defmodule Vaisto.TypeChecker do
   end
 
   # cons: a → (list a) → (list a)
-  def check({:call, :cons, [elem_expr, list_expr]}, env) do
+  defp check_impl({:call, :cons, [elem_expr, list_expr]}, env) do
     with {:ok, elem_type, typed_elem} <- check(elem_expr, env),
          {:ok, list_type, typed_list} <- check(list_expr, env) do
       case list_type do
@@ -409,7 +396,7 @@ defmodule Vaisto.TypeChecker do
   end
 
   # empty?: (list a) → bool
-  def check({:call, :empty?, [list_expr]}, env) do
+  defp check_impl({:call, :empty?, [list_expr]}, env) do
     with {:ok, list_type, typed_list} <- check(list_expr, env) do
       case list_type do
         {:list, _} ->
@@ -423,7 +410,7 @@ defmodule Vaisto.TypeChecker do
   end
 
   # length: (list a) → int
-  def check({:call, :length, [list_expr]}, env) do
+  defp check_impl({:call, :length, [list_expr]}, env) do
     with {:ok, list_type, typed_list} <- check(list_expr, env) do
       case list_type do
         {:list, _} ->
@@ -439,7 +426,7 @@ defmodule Vaisto.TypeChecker do
   # str: variadic string concatenation/conversion
   # (str arg1 arg2 ...) → string
   # Converts each argument to string and concatenates them
-  def check({:call, :str, args}, env) when is_list(args) and length(args) > 0 do
+  defp check_impl({:call, :str, args}, env) when is_list(args) and length(args) > 0 do
     # Type check all arguments - str accepts any type
     results = Enum.map(args, &check(&1, env))
 
@@ -457,7 +444,7 @@ defmodule Vaisto.TypeChecker do
   # (map func list) - applies func to each element
   # Named function version
   # Skip built-in handling if user defined their own map function
-  def check({:call, :map, [func_name, list_expr]}, env) when is_atom(func_name) do
+  defp check_impl({:call, :map, [func_name, list_expr]}, env) when is_atom(func_name) do
     # If map is user-defined in env (not the built-in), use generic call handling
     case Map.get(env, :map) do
       nil -> check_builtin_map(func_name, list_expr, env)
@@ -468,13 +455,13 @@ defmodule Vaisto.TypeChecker do
 
 
   # map with anonymous function (either 3-tuple or 4-tuple with location)
-  def check({:call, :map, [{:fn, _, _, _} = fn_expr, list_expr]}, env) do
+  defp check_impl({:call, :map, [{:fn, _, _, _} = fn_expr, list_expr]}, env) do
     case Map.get(env, :map) do
       nil -> check({:call, :map, [strip_fn_loc(fn_expr), list_expr]}, env)
       _user_defined -> check_generic_call(:map, [fn_expr, list_expr], env)
     end
   end
-  def check({:call, :map, [{:fn, _, _} = fn_expr, list_expr]}, env) do
+  defp check_impl({:call, :map, [{:fn, _, _} = fn_expr, list_expr]}, env) do
     case Map.get(env, :map) do
       nil -> check_builtin_map_anon(fn_expr, list_expr, env)
       _user_defined -> check_generic_call(:map, [fn_expr, list_expr], env)
@@ -486,7 +473,7 @@ defmodule Vaisto.TypeChecker do
   # filter: (a → bool) → (list a) → (list a)
   # (filter predicate list) - keeps elements where predicate returns true
   # Named function version - skip built-in if user defined filter
-  def check({:call, :filter, [func_name, list_expr]}, env) when is_atom(func_name) do
+  defp check_impl({:call, :filter, [func_name, list_expr]}, env) when is_atom(func_name) do
     case Map.get(env, :filter) do
       nil -> check_builtin_filter(func_name, list_expr, env)
       _user_defined -> check_generic_call(:filter, [func_name, list_expr], env)
@@ -496,13 +483,13 @@ defmodule Vaisto.TypeChecker do
 
 
   # filter with anonymous function (either 3-tuple or 4-tuple with location)
-  def check({:call, :filter, [{:fn, _, _, _} = fn_expr, list_expr]}, env) do
+  defp check_impl({:call, :filter, [{:fn, _, _, _} = fn_expr, list_expr]}, env) do
     case Map.get(env, :filter) do
       nil -> check({:call, :filter, [strip_fn_loc(fn_expr), list_expr]}, env)
       _user_defined -> check_generic_call(:filter, [fn_expr, list_expr], env)
     end
   end
-  def check({:call, :filter, [{:fn, _, _} = fn_expr, list_expr]}, env) do
+  defp check_impl({:call, :filter, [{:fn, _, _} = fn_expr, list_expr]}, env) do
     case Map.get(env, :filter) do
       nil -> check_builtin_filter_anon(fn_expr, list_expr, env)
       _user_defined -> check_generic_call(:filter, [fn_expr, list_expr], env)
@@ -514,7 +501,7 @@ defmodule Vaisto.TypeChecker do
   # fold: (b → a → b) → b → (list a) → b
   # (fold func init list) - left fold
   # Named function version - skip built-in if user defined fold
-  def check({:call, :fold, [func_name, init_expr, list_expr]}, env) when is_atom(func_name) do
+  defp check_impl({:call, :fold, [func_name, init_expr, list_expr]}, env) when is_atom(func_name) do
     case Map.get(env, :fold) do
       nil -> check_builtin_fold(func_name, init_expr, list_expr, env)
       _user_defined -> check_generic_call(:fold, [func_name, init_expr, list_expr], env)
@@ -524,13 +511,13 @@ defmodule Vaisto.TypeChecker do
 
 
   # fold with anonymous function (either 3-tuple or 4-tuple with location)
-  def check({:call, :fold, [{:fn, _, _, _} = fn_expr, init_expr, list_expr]}, env) do
+  defp check_impl({:call, :fold, [{:fn, _, _, _} = fn_expr, init_expr, list_expr]}, env) do
     case Map.get(env, :fold) do
       nil -> check({:call, :fold, [strip_fn_loc(fn_expr), init_expr, list_expr]}, env)
       _user_defined -> check_generic_call(:fold, [fn_expr, init_expr, list_expr], env)
     end
   end
-  def check({:call, :fold, [{:fn, _, _} = fn_expr, init_expr, list_expr]}, env) do
+  defp check_impl({:call, :fold, [{:fn, _, _} = fn_expr, init_expr, list_expr]}, env) do
     case Map.get(env, :fold) do
       nil -> check_builtin_fold_anon(fn_expr, init_expr, list_expr, env)
       _user_defined -> check_generic_call(:fold, [fn_expr, init_expr, list_expr], env)
@@ -541,7 +528,7 @@ defmodule Vaisto.TypeChecker do
 
   # Special form: send (!) - validates message against typed PID
   # (! pid message) → :ok, but only if message is valid for that PID
-  def check({:call, :"!", [pid_expr, msg_expr]}, env) do
+  defp check_impl({:call, :"!", [pid_expr, msg_expr]}, env) do
     with {:ok, pid_type, typed_pid} <- check(pid_expr, env),
          {:ok, msg_type, typed_msg} <- check(msg_expr, env) do
       case pid_type do
@@ -571,7 +558,7 @@ defmodule Vaisto.TypeChecker do
   # Special form: unsafe send (!!) - sends to any PID without message validation
   # (!! pid message) → :ok, requires PID but skips message type checking
   # Use this for remote PIDs or when the PID's message type is unknown
-  def check({:call, :"!!", [pid_expr, msg_expr]}, env) do
+  defp check_impl({:call, :"!!", [pid_expr, msg_expr]}, env) do
     with {:ok, pid_type, typed_pid} <- check(pid_expr, env),
          {:ok, _msg_type, typed_msg} <- check(msg_expr, env) do
       case pid_type do
@@ -602,7 +589,7 @@ defmodule Vaisto.TypeChecker do
   end
 
   # If expression: (if cond then else)
-  def check({:if, condition, then_branch, else_branch}, env) do
+  defp check_impl({:if, condition, then_branch, else_branch}, env) do
     with {:ok, cond_type, typed_cond} <- check(condition, env),
          :ok <- expect_bool(cond_type),
          {:ok, then_type, typed_then} <- check(then_branch, env),
@@ -613,7 +600,7 @@ defmodule Vaisto.TypeChecker do
   end
 
   # Match expression: (match expr [pattern body] ...)
-  def check({:match, expr, clauses}, env) do
+  defp check_impl({:match, expr, clauses}, env) do
     with {:ok, expr_type, typed_expr} <- check(expr, env),
          {:ok, result_type, typed_clauses} <- check_match_clauses(clauses, expr_type, env) do
       {:ok, result_type, {:match, typed_expr, typed_clauses, result_type}}
@@ -623,7 +610,7 @@ defmodule Vaisto.TypeChecker do
   # Receive expression: (receive [pattern body] ...)
   # Blocks until a message matching one of the patterns arrives
   # Patterns are typed as :any (full typed PIDs would constrain this)
-  def check({:receive, clauses}, env) do
+  defp check_impl({:receive, clauses}, env) do
     with {:ok, result_type, typed_clauses} <- check_receive_clauses(clauses, env) do
       {:ok, result_type, {:receive, typed_clauses, result_type}}
     end
@@ -631,7 +618,7 @@ defmodule Vaisto.TypeChecker do
 
   # Let binding: (let [x 1 y 2] body)
   # Each binding extends the env for subsequent bindings and body
-  def check({:let, bindings, body}, env) do
+  defp check_impl({:let, bindings, body}, env) do
     case check_bindings(bindings, env, []) do
       {:ok, extended_env, typed_bindings} ->
         case check(body, extended_env) do
@@ -645,7 +632,7 @@ defmodule Vaisto.TypeChecker do
 
   # Qualified call: (erlang:hd xs) or (Vaisto.TypeChecker.Core/empty-subst)
   # Must come before generic function call to match first
-  def check({:call, {:qualified, mod, func}, args}, env) do
+  defp check_impl({:call, {:qualified, mod, func}, args}, env) do
     # Look up the extern in environment using "mod:func" key
     extern_name = :"#{mod}:#{func}"
     case Map.get(env, extern_name) do
@@ -669,7 +656,7 @@ defmodule Vaisto.TypeChecker do
 
   # Arithmetic operators with numeric type widening
   # Handles: +, -, *, / with int/float/num type hierarchy
-  def check({:call, op, [left, right]}, env) when op in [:+, :-, :*] do
+  defp check_impl({:call, op, [left, right]}, env) when op in [:+, :-, :*] do
     with {:ok, left_type, typed_left} <- check(left, env),
          {:ok, right_type, typed_right} <- check(right, env),
          {:ok, result_type} <- check_numeric_op(op, left_type, right_type) do
@@ -678,7 +665,7 @@ defmodule Vaisto.TypeChecker do
   end
 
   # Division always returns float
-  def check({:call, :/, [left, right]}, env) do
+  defp check_impl({:call, :/, [left, right]}, env) do
     with {:ok, left_type, typed_left} <- check(left, env),
          {:ok, right_type, typed_right} <- check(right, env),
          :ok <- expect_numeric(left_type, "division"),
@@ -688,7 +675,7 @@ defmodule Vaisto.TypeChecker do
   end
 
   # Comparison operators with numeric type support
-  def check({:call, op, [left, right]}, env) when op in [:<, :>, :<=, :>=] do
+  defp check_impl({:call, op, [left, right]}, env) when op in [:<, :>, :<=, :>=] do
     with {:ok, left_type, typed_left} <- check(left, env),
          {:ok, right_type, typed_right} <- check(right, env),
          :ok <- expect_numeric(left_type, "comparison"),
@@ -700,7 +687,7 @@ defmodule Vaisto.TypeChecker do
   # Function call (general case)
   # If func is a local variable holding a function, emit {:apply, var, args, type}
   # If func is a module-level function, emit {:call, name, args, type}
-  def check({:call, func, args}, env) when is_atom(func) do
+  defp check_impl({:call, func, args}, env) when is_atom(func) do
     with {:ok, func_type} <- lookup_function(func, env),
          {:ok, arg_types, typed_args} <- check_args(args, env),
          {:ok, ret_type} <- unify_call(func_type, arg_types, args) do
@@ -717,7 +704,7 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
-  def check({:call, func, args}, env) do
+  defp check_impl({:call, func, args}, env) do
     with {:ok, func_type} <- lookup_function(func, env),
          {:ok, arg_types, typed_args} <- check_args(args, env),
          {:ok, ret_type} <- unify_call(func_type, arg_types, args) do
@@ -726,7 +713,7 @@ defmodule Vaisto.TypeChecker do
   end
 
   # Process definition
-  def check({:process, name, initial_state, handlers}, env) do
+  defp check_impl({:process, name, initial_state, handlers}, env) do
     with {:ok, state_type, _} <- check(initial_state, env),
          {:ok, typed_handlers} <- check_handlers(handlers, state_type, env) do
       process_type = {:process, state_type, handler_types(handlers)}
@@ -735,7 +722,7 @@ defmodule Vaisto.TypeChecker do
   end
 
   # Supervision tree
-  def check({:supervise, strategy, children}, env) do
+  defp check_impl({:supervise, strategy, children}, env) do
     with :ok <- validate_strategy(strategy),
          {:ok, typed_children} <- check_children(children, env) do
       {:ok, :supervisor, {:supervise, strategy, typed_children, :supervisor}}
@@ -744,7 +731,7 @@ defmodule Vaisto.TypeChecker do
 
   # Product type (record): (deftype Point [x :int y :int])
   # Registers a constructor function and a record type
-  def check({:deftype, name, {:product, fields}}, _env) do
+  defp check_impl({:deftype, name, {:product, fields}}, _env) do
     # Normalize field types
     normalized_fields = Enum.map(fields, fn {field_name, type} ->
       {field_name, parse_type_expr(type)}
@@ -764,7 +751,7 @@ defmodule Vaisto.TypeChecker do
   # - None constructor: () -> Option
   #
   # This enables type inference to propagate concrete types through constructors.
-  def check({:deftype, name, {:sum, variants}}, _env) do
+  defp check_impl({:deftype, name, {:sum, variants}}, _env) do
     # Collect all type parameters used across variants
     all_params = variants
     |> Enum.flat_map(fn {_ctor, params} -> params end)
@@ -788,13 +775,13 @@ defmodule Vaisto.TypeChecker do
   end
 
   # Legacy support: old-style deftype without wrapper
-  def check({:deftype, name, fields}, env) when is_list(fields) do
+  defp check_impl({:deftype, name, fields}, env) when is_list(fields) do
     check({:deftype, name, {:product, fields}}, env)
   end
 
   # Function definition: (defn add [x :int y :int] (+ x y))
   # Params are now [{:x, :int}, {:y, :int}] tuples with types
-  def check({:defn, name, params, body, declared_ret_type}, env) do
+  defp check_impl({:defn, name, params, body, declared_ret_type}, env) do
     # Extract param names and types
     param_names = Enum.map(params, fn {n, _t} -> n end)
     param_types = Enum.map(params, fn {_n, t} -> t end)
@@ -823,13 +810,13 @@ defmodule Vaisto.TypeChecker do
   end
 
   # Legacy form without return type annotation
-  def check({:defn, name, params, body}, env) do
+  defp check_impl({:defn, name, params, body}, env) do
     check({:defn, name, params, body, :any}, env)
   end
 
   # Value binding: (def name value)
   # Creates a module-level constant
-  def check({:defval, name, value}, env) do
+  defp check_impl({:defval, name, value}, env) do
     case check(value, env) do
       {:ok, val_type, typed_value} ->
         {:ok, val_type, {:defval, name, typed_value, val_type}}
@@ -839,7 +826,7 @@ defmodule Vaisto.TypeChecker do
 
   # Anonymous function: (fn [x] (* x 2))
   # Uses Hindley-Milner inference to determine parameter types
-  def check({:fn, params, body}, env) do
+  defp check_impl({:fn, params, body}, env) do
     # Try inference first for better type information
     case Vaisto.TypeSystem.Infer.infer({:fn, params, body}, env) do
       {:ok, func_type, typed_ast} ->
@@ -875,7 +862,7 @@ defmodule Vaisto.TypeChecker do
 
   # Multi-clause function definition
   # (defn len [[] 0] [[h | t] (+ 1 (len t))])
-  def check({:defn_multi, name, clauses}, env) do
+  defp check_impl({:defn_multi, name, clauses}, env) do
     # Determine arity from first clause pattern
     # List patterns ([], [h|t], {:list, ...}) → arity 1 (single list argument)
     # Record patterns ({:call, name, args}) → arity = length(args)
@@ -928,7 +915,7 @@ defmodule Vaisto.TypeChecker do
 
   # Extern declaration: (extern erlang:hd [:any] :any)
   # Registers the function signature in the environment
-  def check({:extern, mod, func, arg_types, ret_type}, _env) do
+  defp check_impl({:extern, mod, func, arg_types, ret_type}, _env) do
     # Parse type expressions (e.g., {:call, :List, [:any]} → {:list, :any})
     parsed_arg_types = Enum.map(arg_types, &parse_type_expr/1)
     parsed_ret_type = parse_type_expr(ret_type)
@@ -938,20 +925,21 @@ defmodule Vaisto.TypeChecker do
 
   # Module declaration: (ns MyModule)
   # Compile-time only - sets the module name for the current file
-  def check({:ns, name}, _env) do
+  defp check_impl({:ns, name}, _env) do
     {:ok, :ns, {:ns, name}}
   end
 
   # Import declaration: (import Std.List) or (import Std.List :as L)
   # Compile-time only - brings another module's exports into scope
   # The actual loading of the interface is done by the build system
-  def check({:import, module, alias_name}, _env) do
+  defp check_impl({:import, module, alias_name}, _env) do
     {:ok, :import, {:import, module, alias_name}}
   end
 
   # Handle parse errors (propagate them as type errors with location info)
-  def check({:error, msg, %Vaisto.Parser.Loc{} = loc}, _env) do
-    {:error, Errors.parse_error(msg, span: Error.span_from_loc(loc), file: loc.file)}
+  # Parse error - location is stripped by generic handler and added via with_loc
+  defp check_impl({:error, msg}, _env) do
+    {:error, Errors.parse_error(msg)}
   end
 
   # Fallback
