@@ -32,6 +32,8 @@ defmodule Vaisto.REPL do
 
   alias Vaisto.TypeSystem.Core
 
+  @version Mix.Project.config()[:version]
+
   # Built-in primitives for the type environment
   @primitives %{
     :+ => {:fn, [:int, :int], :int},
@@ -58,7 +60,7 @@ defmodule Vaisto.REPL do
   """
   @spec start() :: :ok
   def start do
-    IO.puts("Vaisto REPL v0.1 (Algorithm W)")
+    IO.puts("Vaisto REPL v#{@version} (Algorithm W)")
     IO.puts("Type :help for commands, :quit to exit\n")
 
     state = %__MODULE__{

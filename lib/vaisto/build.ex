@@ -32,6 +32,9 @@ defmodule Vaisto.Build do
   @type build_opts :: keyword()
   @type build_result :: {:ok, [map()]} | {:error, term()}
 
+  @source_glob "**/*.va"
+  @prelude_filename "/prelude.va"
+
   @doc """
   Build all .va files in a directory.
 
@@ -105,11 +108,11 @@ defmodule Vaisto.Build do
   # Private helpers
 
   defp scan_files(dir) do
-    pattern = Path.join(dir, "**/*.va")
+    pattern = Path.join(dir, @source_glob)
 
     files =
       Path.wildcard(pattern)
-      |> Enum.reject(&String.ends_with?(&1, "/prelude.va"))
+      |> Enum.reject(&String.ends_with?(&1, @prelude_filename))
 
     if files == [] do
       {:error, "No .va files found in #{dir}"}
