@@ -19,7 +19,7 @@ defmodule Vaisto.CoreEmitter do
   Options:
     - :load - whether to load the module into the VM (default: true)
 
-  Returns {:ok, module_name, binary} or {:error, reason}
+  Returns `{:ok, module_name, binary}` or `{:error, %Vaisto.Error{}}`.
   """
   @spec compile(TypeChecker.typed_ast(), atom(), keyword()) ::
           {:ok, atom(), binary()} | {:error, Error.t()}

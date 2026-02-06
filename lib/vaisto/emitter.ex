@@ -22,7 +22,7 @@ defmodule Vaisto.Emitter do
       iex> Emitter.to_elixir({:call, :+, [{:lit, :int, 1}, {:lit, :int, 2}], :int})
       {:+, [], [1, 2]}
   """
-  @spec to_elixir(TypeChecker.typed_ast()) :: Macro.t()
+  @spec to_elixir(TypeChecker.typed_ast() | integer() | float() | atom()) :: Macro.t()
   def to_elixir(typed_ast)
 
   # Literals pass through
@@ -416,8 +416,8 @@ defmodule Vaisto.Emitter do
   @doc """
   Compile typed AST to a module and return the bytecode.
 
-  Returns {:ok, module_name, bytecode} or {:error, reason}
-  For modules: returns {:ok, :module, [{module_name, bytecode}, ...]}
+  Returns `{:ok, module_name, bytecode}` or `{:error, %Vaisto.Error{}}`.
+  For modules: returns `{:ok, :module, [{module_name, bytecode}, ...]}`.
   """
   @spec compile(TypeChecker.typed_ast(), atom()) ::
           {:ok, atom(), binary() | [{atom(), binary()}]} | {:error, Error.t()}
