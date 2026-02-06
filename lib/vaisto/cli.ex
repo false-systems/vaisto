@@ -51,53 +51,61 @@ defmodule Vaisto.CLI do
   defp parse_args(args), do: parse_compile_or_eval(args)
 
   defp parse_compile_or_eval(args) do
-    {opts, positional, _invalid} =
+    {opts, positional, invalid} =
       OptionParser.parse(args,
         strict: [output: :string, backend: :string, eval: :string, help: :boolean],
         aliases: [o: :output, e: :eval, h: :help]
       )
 
-    cond do
-      opts[:help] ->
-        :help
+    case invalid do
+      [{flag, _} | _] -> {:error, "unknown option: #{flag}. Use --help for usage."}
+      [] ->
+        cond do
+          opts[:help] ->
+            :help
 
-      eval = opts[:eval] ->
-        backend = parse_backend(opts[:backend] || "core")
-        {:eval, eval, backend}
+          eval = opts[:eval] ->
+            backend = parse_backend(opts[:backend] || "core")
+            {:eval, eval, backend}
 
-      length(positional) == 1 ->
-        [input] = positional
-        backend = parse_backend(opts[:backend] || "core")
-        output = opts[:output] || default_output(input)
-        {:compile, input, output, backend}
+          length(positional) == 1 ->
+            [input] = positional
+            backend = parse_backend(opts[:backend] || "core")
+            output = opts[:output] || default_output(input)
+            {:compile, input, output, backend}
 
-      true ->
-        {:error, "invalid arguments. Use --help for usage."}
+          true ->
+            {:error, "invalid arguments. Use --help for usage."}
+        end
     end
   end
 
   defp parse_build(args) do
-    {opts, positional, _invalid} =
+    {opts, positional, invalid} =
       OptionParser.parse(args,
         strict: [output: :string, backend: :string, src: :keep],
         aliases: [o: :output]
       )
 
-    dir = List.first(positional) || "."
-    output = opts[:output] || dir
-    backend = parse_backend(opts[:backend] || "core")
+    case invalid do
+      [{flag, _} | _] -> {:error, "unknown build option: #{flag}. Use --help for usage."}
+      [] ->
+        dir = List.first(positional) || "."
+        output = opts[:output] || dir
+        backend = parse_backend(opts[:backend] || "core")
 
-    src_roots =
-      opts
-      |> Keyword.get_values(:src)
-      |> Enum.map(fn root ->
-        case String.split(root, ":", parts: 2) do
-          [path, prefix] -> {path, prefix}
-          [path] -> {path, ""}
-        end
-      end)
+        src_roots =
+          opts
+          |> Keyword.get_values(:src)
+          |> Enum.map(fn root ->
+            case String.split(root, ":", parts: 2) do
+              [path, prefix] -> {path, prefix}
+              [path] -> {path, ""}
+            end
+          end)
 
-    {:build, dir, output, backend, src_roots}
+        {:build, dir, output, backend, src_roots}
+    end
   end
 
   defp parse_backend("core"), do: :core
