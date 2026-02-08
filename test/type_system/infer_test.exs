@@ -290,6 +290,131 @@ defmodule Vaisto.TypeSystem.InferTest do
     end
   end
 
+  describe "list builtins" do
+    test "head returns element type" do
+      env = Map.merge(Infer.__primitives__(), %{:xs => {:list, :int}})
+      {:ok, type, _ast} = Infer.infer({:call, :head, [:xs]}, env)
+      assert type == :int
+    end
+
+    test "head on :any returns :any" do
+      env = Map.merge(Infer.__primitives__(), %{:xs => :any})
+      {:ok, type, _ast} = Infer.infer({:call, :head, [:xs]}, env)
+      assert type == :any
+    end
+
+    test "head errors on non-list" do
+      assert {:error, msg} = Infer.infer({:call, :head, [42]})
+      assert msg =~ "head expects a list"
+    end
+
+    test "tail returns list type" do
+      env = Map.merge(Infer.__primitives__(), %{:xs => {:list, :int}})
+      {:ok, type, _ast} = Infer.infer({:call, :tail, [:xs]}, env)
+      assert type == {:list, :int}
+    end
+
+    test "tail on :any returns list of :any" do
+      env = Map.merge(Infer.__primitives__(), %{:xs => :any})
+      {:ok, type, _ast} = Infer.infer({:call, :tail, [:xs]}, env)
+      assert type == {:list, :any}
+    end
+
+    test "tail errors on non-list" do
+      assert {:error, msg} = Infer.infer({:call, :tail, [42]})
+      assert msg =~ "tail expects a list"
+    end
+
+    test "empty? returns bool" do
+      env = Map.merge(Infer.__primitives__(), %{:xs => {:list, :int}})
+      {:ok, type, _ast} = Infer.infer({:call, :empty?, [:xs]}, env)
+      assert type == :bool
+    end
+
+    test "empty? on :any returns bool" do
+      env = Map.merge(Infer.__primitives__(), %{:xs => :any})
+      {:ok, type, _ast} = Infer.infer({:call, :empty?, [:xs]}, env)
+      assert type == :bool
+    end
+
+    test "empty? errors on non-list" do
+      assert {:error, msg} = Infer.infer({:call, :empty?, [42]})
+      assert msg =~ "empty? expects a list"
+    end
+
+    test "length returns int" do
+      env = Map.merge(Infer.__primitives__(), %{:xs => {:list, :int}})
+      {:ok, type, _ast} = Infer.infer({:call, :length, [:xs]}, env)
+      assert type == :int
+    end
+
+    test "length errors on non-list" do
+      assert {:error, msg} = Infer.infer({:call, :length, [42]})
+      assert msg =~ "length expects a list"
+    end
+
+    test "head typed AST shape" do
+      env = Map.merge(Infer.__primitives__(), %{:xs => {:list, :int}})
+      {:ok, _type, ast} = Infer.infer({:call, :head, [:xs]}, env)
+      assert {:call, :head, [_], :int} = ast
+    end
+  end
+
+  describe "str builtin" do
+    test "str returns string" do
+      {:ok, type, _ast} = Infer.infer({:call, :str, [{:string, "hello"}, {:string, " world"}]})
+      assert type == :string
+    end
+
+    test "str accepts any types" do
+      {:ok, type, _ast} = Infer.infer({:call, :str, [{:string, "value: "}, 42]})
+      assert type == :string
+    end
+
+    test "str with single arg" do
+      {:ok, type, _ast} = Infer.infer({:call, :str, [42]})
+      assert type == :string
+    end
+
+    test "str typed AST shape" do
+      {:ok, _type, ast} = Infer.infer({:call, :str, [1, true]})
+      assert {:call, :str, [_, _], :string} = ast
+    end
+  end
+
+  describe "function references" do
+    test "fn_ref from environment" do
+      env = Map.merge(Infer.__primitives__(), %{:my_fn => {:fn, [:int], :bool}})
+      {:ok, type, ast} = Infer.infer({:fn_ref, :my_fn, 1}, env)
+      assert type == {:fn, [:int], :bool}
+      assert {:fn_ref, :my_fn, 1, {:fn, [:int], :bool}} = ast
+    end
+
+    test "fn_ref errors on undefined" do
+      assert {:error, msg} = Infer.infer({:fn_ref, :unknown, 1})
+      assert msg =~ "Undefined function reference"
+    end
+
+    test "variable lookup emits fn_ref for function types" do
+      env = Map.merge(Infer.__primitives__(), %{:add => {:fn, [:int, :int], :int}})
+      {:ok, type, ast} = Infer.infer({:var, :add}, env)
+      assert type == {:fn, [:int, :int], :int}
+      assert {:fn_ref, :add, 2, _} = ast
+    end
+
+    test "variable lookup emits var for non-function types" do
+      env = Map.merge(Infer.__primitives__(), %{:x => :int})
+      {:ok, _type, ast} = Infer.infer({:var, :x}, env)
+      assert {:var, :x, :int} = ast
+    end
+
+    test "bare atom lookup emits fn_ref for function types" do
+      env = Map.merge(Infer.__primitives__(), %{:f => {:fn, [:int], :int}})
+      {:ok, _type, ast} = Infer.infer(:f, env)
+      assert {:fn_ref, :f, 1, _} = ast
+    end
+  end
+
   describe "do blocks" do
     test "empty do block infers unit" do
       {:ok, type, _ast} = Infer.infer({:do, []})

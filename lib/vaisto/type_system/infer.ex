@@ -84,9 +84,8 @@ defmodule Vaisto.TypeSystem.Infer do
   defp infer_expr({:var, name}, ctx) do
     case Context.lookup(ctx, name) do
       {:ok, scheme} ->
-        # Instantiate if polymorphic
         {type, ctx} = Context.instantiate(ctx, scheme)
-        {:ok, type, {:var, name, type}, ctx}
+        {:ok, type, var_or_fn_ref(name, type), ctx}
 
       :error ->
         {:error, "Undefined variable: #{name}"}
@@ -98,11 +97,23 @@ defmodule Vaisto.TypeSystem.Infer do
     case Context.lookup(ctx, a) do
       {:ok, scheme} ->
         {type, ctx} = Context.instantiate(ctx, scheme)
-        {:ok, type, {:var, a, type}, ctx}
+        {:ok, type, var_or_fn_ref(a, type), ctx}
 
       :error ->
         # It's a literal atom
         {:ok, {:atom, a}, {:lit, :atom, a}, ctx}
+    end
+  end
+
+  # Function reference node
+  defp infer_expr({:fn_ref, name, arity}, ctx) when is_atom(name) do
+    case Context.lookup(ctx, name) do
+      {:ok, scheme} ->
+        {type, ctx} = Context.instantiate(ctx, scheme)
+        {:ok, type, {:fn_ref, name, arity, type}, ctx}
+
+      :error ->
+        {:error, "Undefined function reference: #{name}/#{arity}"}
     end
   end
 
@@ -132,6 +143,85 @@ defmodule Vaisto.TypeSystem.Infer do
   # Strip location from fn nodes
   defp infer_expr({:fn, params, body, %Vaisto.Parser.Loc{}}, ctx) do
     infer_expr({:fn, params, body}, ctx)
+  end
+
+  # --- List Builtins ---
+
+  defp infer_expr({:call, :head, [list_expr]}, ctx) do
+    case infer_expr(list_expr, ctx) do
+      {:ok, {:list, elem_type}, typed_list, ctx} ->
+        {:ok, elem_type, {:call, :head, [typed_list], elem_type}, ctx}
+
+      {:ok, :any, typed_list, ctx} ->
+        {:ok, :any, {:call, :head, [typed_list], :any}, ctx}
+
+      {:ok, other_type, _typed_list, _ctx} ->
+        {:error, "head expects a list, got #{Core.format_type(other_type)}"}
+
+      error ->
+        error
+    end
+  end
+
+  defp infer_expr({:call, :tail, [list_expr]}, ctx) do
+    case infer_expr(list_expr, ctx) do
+      {:ok, {:list, _} = list_type, typed_list, ctx} ->
+        {:ok, list_type, {:call, :tail, [typed_list], list_type}, ctx}
+
+      {:ok, :any, typed_list, ctx} ->
+        list_type = {:list, :any}
+        {:ok, list_type, {:call, :tail, [typed_list], list_type}, ctx}
+
+      {:ok, other_type, _typed_list, _ctx} ->
+        {:error, "tail expects a list, got #{Core.format_type(other_type)}"}
+
+      error ->
+        error
+    end
+  end
+
+  defp infer_expr({:call, :empty?, [list_expr]}, ctx) do
+    case infer_expr(list_expr, ctx) do
+      {:ok, {:list, _}, typed_list, ctx} ->
+        {:ok, :bool, {:call, :empty?, [typed_list], :bool}, ctx}
+
+      {:ok, :any, typed_list, ctx} ->
+        {:ok, :bool, {:call, :empty?, [typed_list], :bool}, ctx}
+
+      {:ok, other_type, _typed_list, _ctx} ->
+        {:error, "empty? expects a list, got #{Core.format_type(other_type)}"}
+
+      error ->
+        error
+    end
+  end
+
+  defp infer_expr({:call, :length, [list_expr]}, ctx) do
+    case infer_expr(list_expr, ctx) do
+      {:ok, {:list, _}, typed_list, ctx} ->
+        {:ok, :int, {:call, :length, [typed_list], :int}, ctx}
+
+      {:ok, :any, typed_list, ctx} ->
+        {:ok, :int, {:call, :length, [typed_list], :int}, ctx}
+
+      {:ok, other_type, _typed_list, _ctx} ->
+        {:error, "length expects a list, got #{Core.format_type(other_type)}"}
+
+      error ->
+        error
+    end
+  end
+
+  # --- Str (variadic string concat) ---
+
+  defp infer_expr({:call, :str, args}, ctx) when length(args) > 0 do
+    case infer_all_elements(args, ctx, []) do
+      {:ok, typed_args, ctx} ->
+        {:ok, :string, {:call, :str, typed_args, :string}, ctx}
+
+      error ->
+        error
+    end
   end
 
   # --- Function Application ---
@@ -379,6 +469,13 @@ defmodule Vaisto.TypeSystem.Infer do
   end
 
   # --- Helpers ---
+
+  # Emit {:fn_ref, ...} for function types used as values, {:var, ...} otherwise
+  defp var_or_fn_ref(name, {:fn, params, _} = type) do
+    {:fn_ref, name, length(params), type}
+  end
+
+  defp var_or_fn_ref(name, type), do: {:var, name, type}
 
   defp infer_application(func_name, func_type, args, ctx) do
     case func_type do
@@ -696,6 +793,10 @@ defmodule Vaisto.TypeSystem.Infer do
 
   defp apply_subst_to_ast({:var, name, type}, subst) do
     {:var, name, Core.apply_subst(subst, type)}
+  end
+
+  defp apply_subst_to_ast({:fn_ref, name, arity, type}, subst) do
+    {:fn_ref, name, arity, Core.apply_subst(subst, type)}
   end
 
   defp apply_subst_to_ast({:fn, params, body, type}, subst) do
