@@ -224,6 +224,110 @@ defmodule Vaisto.TypeSystem.Infer do
     end
   end
 
+  # --- Map Builtin ---
+
+  defp infer_expr({:call, :map, [func_expr, list_expr]}, ctx) do
+    with {:ok, func_type, typed_func, ctx} <- infer_expr(func_expr, ctx),
+         {:ok, _list_type, typed_list, ctx} <- infer_expr(list_expr, ctx) do
+      case func_type do
+        {:fn, [_arg_type], ret_type} ->
+          result_type = {:list, ret_type}
+          {:ok, result_type, {:call, :map, [typed_func, typed_list], result_type}, ctx}
+
+        {:fn, args, _} ->
+          {:error, "map expects a function with 1 argument, got #{length(args)}"}
+
+        :any ->
+          {:ok, {:list, :any}, {:call, :map, [typed_func, typed_list], {:list, :any}}, ctx}
+
+        _ ->
+          {:error, "map expects a function as first argument, got #{Core.format_type(func_type)}"}
+      end
+    end
+  end
+
+  # --- Filter Builtin ---
+
+  defp infer_expr({:call, :filter, [func_expr, list_expr]}, ctx) do
+    with {:ok, func_type, typed_func, ctx} <- infer_expr(func_expr, ctx),
+         {:ok, list_type, typed_list, ctx} <- infer_expr(list_expr, ctx) do
+      case func_type do
+        {:fn, [_arg_type], ret_type} when ret_type in [:bool, :any] ->
+          result_type = list_type
+          {:ok, result_type, {:call, :filter, [typed_func, typed_list], result_type}, ctx}
+
+        {:fn, [_arg_type], ret_type} ->
+          {:error, "filter predicate must return Bool, got #{Core.format_type(ret_type)}"}
+
+        {:fn, args, _} ->
+          {:error, "filter expects a function with 1 argument, got #{length(args)}"}
+
+        :any ->
+          {:ok, list_type, {:call, :filter, [typed_func, typed_list], list_type}, ctx}
+
+        _ ->
+          {:error, "filter expects a function as first argument, got #{Core.format_type(func_type)}"}
+      end
+    end
+  end
+
+  # --- Fold Builtin ---
+
+  defp infer_expr({:call, :fold, [func_expr, init_expr, list_expr]}, ctx) do
+    with {:ok, func_type, typed_func, ctx} <- infer_expr(func_expr, ctx),
+         {:ok, init_type, typed_init, ctx} <- infer_expr(init_expr, ctx),
+         {:ok, _list_type, typed_list, ctx} <- infer_expr(list_expr, ctx) do
+      case func_type do
+        {:fn, [_acc_type, _elem_type], ret_type} ->
+          {:ok, ret_type, {:call, :fold, [typed_func, typed_init, typed_list], ret_type}, ctx}
+
+        {:fn, args, _} ->
+          {:error, "fold expects a function with 2 arguments, got #{length(args)}"}
+
+        :any ->
+          {:ok, init_type, {:call, :fold, [typed_func, typed_init, typed_list], init_type}, ctx}
+
+        _ ->
+          {:error, "fold expects a function as first argument, got #{Core.format_type(func_type)}"}
+      end
+    end
+  end
+
+  # --- Qualified Calls ---
+  # (Mod/func args...) → lookup extern type or fall back to :any
+
+  defp infer_expr({:call, {:qualified, mod, func}, args}, ctx) do
+    extern_name = :"#{mod}:#{func}"
+
+    case Context.lookup(ctx, extern_name) do
+      {:ok, {:fn, _param_types, ret_type}} ->
+        case infer_all_elements(args, ctx, []) do
+          {:ok, typed_args, ctx} ->
+            {:ok, ret_type, {:call, {:qualified, mod, func}, typed_args, ret_type}, ctx}
+
+          error ->
+            error
+        end
+
+      {:ok, _other} ->
+        {:error, "#{mod}:#{func} is not a function"}
+
+      :error ->
+        # Not registered — allow with :any (dynamic interop)
+        case infer_all_elements(args, ctx, []) do
+          {:ok, typed_args, ctx} ->
+            {:ok, :any, {:call, {:qualified, mod, func}, typed_args, :any}, ctx}
+
+          error ->
+            error
+        end
+    end
+  end
+
+  defp infer_expr({:call, {:qualified, mod, func}, args, %Vaisto.Parser.Loc{}}, ctx) do
+    infer_expr({:call, {:qualified, mod, func}, args}, ctx)
+  end
+
   # --- Function Application ---
 
   defp infer_expr({:call, func, args}, ctx) when is_atom(func) do
@@ -244,6 +348,32 @@ defmodule Vaisto.TypeSystem.Infer do
       {:error, msg} -> {:error, with_location(msg, loc)}
     end
   end
+
+  # --- Higher-order Apply ---
+  # (expr args...) where expr is not an atom — call a function expression
+
+  defp infer_expr({:call, func_expr, args}, ctx) do
+    with {:ok, func_type, typed_func, ctx} <- infer_expr(func_expr, ctx) do
+      {ret_tvar, ctx} = Context.fresh_var(ctx)
+      {arg_tvars, ctx} = Context.fresh_vars(ctx, length(args))
+      expected_fn_type = {:fn, arg_tvars, ret_tvar}
+
+      case Context.unify_types(ctx, func_type, expected_fn_type) do
+        {:ok, ctx} ->
+          case infer_and_unify_args(args, arg_tvars, ctx, []) do
+            {:ok, typed_args, ctx} ->
+              {:ok, ret_tvar, {:apply, typed_func, typed_args, ret_tvar}, ctx}
+
+            error ->
+              error
+          end
+
+        {:error, reason} ->
+          {:error, "Cannot call non-function: #{reason}"}
+      end
+    end
+  end
+
 
   # --- Let Bindings ---
   # (let [x expr1] body) - with let-polymorphism
@@ -793,6 +923,10 @@ defmodule Vaisto.TypeSystem.Infer do
 
   defp apply_subst_to_ast({:var, name, type}, subst) do
     {:var, name, Core.apply_subst(subst, type)}
+  end
+
+  defp apply_subst_to_ast({:apply, func, args, type}, subst) do
+    {:apply, apply_subst_to_ast(func, subst), Enum.map(args, &apply_subst_to_ast(&1, subst)), Core.apply_subst(subst, type)}
   end
 
   defp apply_subst_to_ast({:fn_ref, name, arity, type}, subst) do

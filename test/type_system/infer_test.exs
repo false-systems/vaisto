@@ -415,6 +415,208 @@ defmodule Vaisto.TypeSystem.InferTest do
     end
   end
 
+  describe "map builtin" do
+    test "map with named function" do
+      env = Map.merge(Infer.__primitives__(), %{
+        :inc => {:fn, [:int], :int},
+        :xs => {:list, :int}
+      })
+      {:ok, type, _ast} = Infer.infer({:call, :map, [:inc, :xs]}, env)
+      assert type == {:list, :int}
+    end
+
+    test "map with anonymous function" do
+      env = Map.merge(Infer.__primitives__(), %{:xs => {:list, :int}})
+      {:ok, type, _ast} = Infer.infer(
+        {:call, :map, [{:fn, [:x], {:call, :+, [:x, 1]}}, :xs]},
+        env
+      )
+      assert type == {:list, :int}
+    end
+
+    test "map errors on wrong arity" do
+      env = Map.merge(Infer.__primitives__(), %{
+        :add => {:fn, [:int, :int], :int},
+        :xs => {:list, :int}
+      })
+      assert {:error, msg} = Infer.infer({:call, :map, [:add, :xs]}, env)
+      assert msg =~ "1 argument"
+    end
+
+    test "map errors on non-function" do
+      env = Map.merge(Infer.__primitives__(), %{:xs => {:list, :int}})
+      assert {:error, msg} = Infer.infer({:call, :map, [42, :xs]}, env)
+      assert msg =~ "function"
+    end
+
+    test "map typed AST shape" do
+      env = Map.merge(Infer.__primitives__(), %{
+        :inc => {:fn, [:int], :int},
+        :xs => {:list, :int}
+      })
+      {:ok, _type, ast} = Infer.infer({:call, :map, [:inc, :xs]}, env)
+      assert {:call, :map, [_, _], {:list, :int}} = ast
+    end
+  end
+
+  describe "filter builtin" do
+    test "filter with predicate" do
+      env = Map.merge(Infer.__primitives__(), %{
+        :pos? => {:fn, [:int], :bool},
+        :xs => {:list, :int}
+      })
+      {:ok, type, _ast} = Infer.infer({:call, :filter, [:pos?, :xs]}, env)
+      assert type == {:list, :int}
+    end
+
+    test "filter with anonymous predicate" do
+      env = Map.merge(Infer.__primitives__(), %{:xs => {:list, :int}})
+      {:ok, type, _ast} = Infer.infer(
+        {:call, :filter, [{:fn, [:x], {:call, :>, [:x, 0]}}, :xs]},
+        env
+      )
+      assert type == {:list, :int}
+    end
+
+    test "filter errors when predicate doesn't return bool" do
+      env = Map.merge(Infer.__primitives__(), %{
+        :inc => {:fn, [:int], :int},
+        :xs => {:list, :int}
+      })
+      assert {:error, msg} = Infer.infer({:call, :filter, [:inc, :xs]}, env)
+      assert msg =~ "Bool"
+    end
+
+    test "filter errors on wrong arity" do
+      env = Map.merge(Infer.__primitives__(), %{
+        :add => {:fn, [:int, :int], :int},
+        :xs => {:list, :int}
+      })
+      assert {:error, msg} = Infer.infer({:call, :filter, [:add, :xs]}, env)
+      assert msg =~ "1 argument"
+    end
+  end
+
+  describe "fold builtin" do
+    test "fold with accumulator function" do
+      env = Map.merge(Infer.__primitives__(), %{:xs => {:list, :int}})
+      {:ok, type, _ast} = Infer.infer(
+        {:call, :fold, [{:fn, [:acc, :x], {:call, :+, [:acc, :x]}}, 0, :xs]},
+        env
+      )
+      assert type == :int
+    end
+
+    test "fold with named function" do
+      env = Map.merge(Infer.__primitives__(), %{
+        :add => {:fn, [:int, :int], :int},
+        :xs => {:list, :int}
+      })
+      {:ok, type, _ast} = Infer.infer({:call, :fold, [:add, 0, :xs]}, env)
+      assert type == :int
+    end
+
+    test "fold errors on wrong arity" do
+      env = Map.merge(Infer.__primitives__(), %{
+        :inc => {:fn, [:int], :int},
+        :xs => {:list, :int}
+      })
+      assert {:error, msg} = Infer.infer({:call, :fold, [:inc, 0, :xs]}, env)
+      assert msg =~ "2 arguments"
+    end
+
+    test "fold errors on non-function" do
+      env = Map.merge(Infer.__primitives__(), %{:xs => {:list, :int}})
+      assert {:error, msg} = Infer.infer({:call, :fold, [42, 0, :xs]}, env)
+      assert msg =~ "function"
+    end
+
+    test "fold typed AST shape" do
+      env = Map.merge(Infer.__primitives__(), %{
+        :add => {:fn, [:int, :int], :int},
+        :xs => {:list, :int}
+      })
+      {:ok, _type, ast} = Infer.infer({:call, :fold, [:add, 0, :xs]}, env)
+      assert {:call, :fold, [_, _, _], :int} = ast
+    end
+  end
+
+  describe "qualified calls" do
+    test "qualified call with known extern returns typed result" do
+      env = Map.merge(Infer.__primitives__(), %{
+        :"Std.List:length" => {:fn, [{:list, :any}], :int}
+      })
+      {:ok, type, _ast} = Infer.infer(
+        {:call, {:qualified, :"Std.List", :length}, [{:list, [1, 2]}]},
+        env
+      )
+      assert type == :int
+    end
+
+    test "qualified call with unknown extern returns :any" do
+      {:ok, type, _ast} = Infer.infer(
+        {:call, {:qualified, :SomeModule, :func}, [42]}
+      )
+      assert type == :any
+    end
+
+    test "qualified call typed AST shape" do
+      {:ok, _type, ast} = Infer.infer(
+        {:call, {:qualified, :Mod, :func}, [1, 2]}
+      )
+      assert {:call, {:qualified, :Mod, :func}, [_, _], :any} = ast
+    end
+
+    test "location stripping for qualified calls" do
+      loc = %Vaisto.Parser.Loc{line: 1, col: 1, file: nil}
+      {:ok, type, _ast} = Infer.infer(
+        {:call, {:qualified, :Mod, :func}, [42], loc}
+      )
+      assert type == :any
+    end
+  end
+
+  describe "higher-order apply" do
+    test "applying a function variable via let" do
+      # (let [f (fn [x] (+ x 1))] (f 42)) — f is a let-bound function
+      {:ok, type, _ast} = Infer.infer(
+        {:let, [{:f, {:fn, [:x], {:call, :+, [:x, 1]}}}],
+         {:call, :f, [42]}}
+      )
+      assert type == :int
+    end
+
+    test "applying an anonymous function expression" do
+      # ((fn [x] (+ x 1)) 42)
+      {:ok, type, _ast} = Infer.infer(
+        {:call, {:fn, [:x], {:call, :+, [:x, 1]}}, [42]}
+      )
+      assert type == :int
+    end
+
+    test "apply emits :apply AST node for expression calls" do
+      {:ok, _type, ast} = Infer.infer(
+        {:call, {:fn, [:x], :x}, [42]}
+      )
+      assert {:apply, {:fn, _, _, _}, [_], _} = ast
+    end
+
+    test "apply errors on non-function expression" do
+      assert {:error, msg} = Infer.infer(
+        {:call, 42, [1]}
+      )
+      assert msg =~ "non-function"
+    end
+
+    test "apply with location stripping" do
+      loc = %Vaisto.Parser.Loc{line: 1, col: 1, file: nil}
+      {:ok, type, _ast} = Infer.infer(
+        {:call, {:fn, [:x], :x}, [42], loc}
+      )
+      assert type == :int
+    end
+  end
+
   describe "do blocks" do
     test "empty do block infers unit" do
       {:ok, type, _ast} = Infer.infer({:do, []})
