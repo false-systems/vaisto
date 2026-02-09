@@ -1,0 +1,577 @@
+{
+  "system": "vaistoc CLI",
+  "version": "0.1.0",
+  "contract_source": "vaistoc --help output, CLAUDE.md, examples/",
+  "cases": [
+    {
+      "id": "POS-001",
+      "category": "positive",
+      "description": "Eval simple arithmetic addition",
+      "command": ["--eval", "(+ 1 2)"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "3"
+    },
+    {
+      "id": "POS-002",
+      "category": "positive",
+      "description": "Eval multiplication",
+      "command": ["--eval", "(* 6 7)"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "42"
+    },
+    {
+      "id": "POS-003",
+      "category": "positive",
+      "description": "Eval nested arithmetic",
+      "command": ["--eval", "(* (+ 1 2) (- 10 3))"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "21"
+    },
+    {
+      "id": "POS-004",
+      "category": "positive",
+      "description": "Eval if-then-else true branch",
+      "command": ["--eval", "(if true 1 0)"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "1"
+    },
+    {
+      "id": "POS-005",
+      "category": "positive",
+      "description": "Eval if-then-else false branch",
+      "command": ["--eval", "(if false 1 0)"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "0"
+    },
+    {
+      "id": "POS-006",
+      "category": "positive",
+      "description": "Eval let binding",
+      "command": ["--eval", "(let [x 10] (+ x 5))"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "15"
+    },
+    {
+      "id": "POS-007",
+      "category": "positive",
+      "description": "Eval string concatenation",
+      "command": ["--eval", "(str \"hello\" \" \" \"world\")"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "hello world"
+    },
+    {
+      "id": "POS-008",
+      "category": "positive",
+      "description": "Eval function definition and call",
+      "command": ["--eval", "(defn f [x :int] :int (+ x 1)) (f 5)"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "6"
+    },
+    {
+      "id": "POS-009",
+      "category": "positive",
+      "description": "Eval do block returns last expression",
+      "command": ["--eval", "(do (+ 1 2) (* 3 4))"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "12"
+    },
+    {
+      "id": "POS-010",
+      "category": "positive",
+      "description": "Eval boolean literal true",
+      "command": ["--eval", "true"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "true"
+    },
+    {
+      "id": "POS-011",
+      "category": "positive",
+      "description": "Eval boolean literal false",
+      "command": ["--eval", "false"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "false"
+    },
+    {
+      "id": "POS-012",
+      "category": "positive",
+      "description": "Eval string literal",
+      "command": ["--eval", "\"hello\""],
+      "expect_exit": 0,
+      "expect_stdout_contains": "hello"
+    },
+    {
+      "id": "POS-013",
+      "category": "positive",
+      "description": "Eval integer literal",
+      "command": ["--eval", "42"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "42"
+    },
+    {
+      "id": "POS-014",
+      "category": "positive",
+      "description": "Eval list literal",
+      "command": ["--eval", "[1 2 3]"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "[1, 2, 3]"
+    },
+    {
+      "id": "POS-015",
+      "category": "positive",
+      "description": "Eval deftype and match exhaustive",
+      "command": ["--eval", "(deftype Color (Red) (Green) (Blue)) (match (Red) [(Red) 1] [(Green) 2] [(Blue) 3])"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "1"
+    },
+    {
+      "id": "POS-016",
+      "category": "positive",
+      "description": "Eval ADT with data and pattern match",
+      "command": ["--eval", "(deftype Maybe (Just v) (Nothing)) (match (Just 42) [(Just v) v] [(Nothing) 0])"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "42"
+    },
+    {
+      "id": "POS-017",
+      "category": "positive",
+      "description": "Eval subtraction",
+      "command": ["--eval", "(- 100 58)"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "42"
+    },
+    {
+      "id": "POS-018",
+      "category": "positive",
+      "description": "Eval integer division",
+      "command": ["--eval", "(/ 10 2)"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "5"
+    },
+    {
+      "id": "POS-019",
+      "category": "positive",
+      "description": "Eval comparison operators",
+      "command": ["--eval", "(> 5 3)"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "true"
+    },
+    {
+      "id": "POS-020",
+      "category": "positive",
+      "description": "Eval equality",
+      "command": ["--eval", "(== 5 5)"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "true"
+    },
+    {
+      "id": "POS-021",
+      "category": "positive",
+      "description": "Compile valid .va file (math example)",
+      "command": ["examples/math.va"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "Compiled",
+      "cleanup": ["examples/Elixir.Math.beam"]
+    },
+    {
+      "id": "POS-022",
+      "category": "positive",
+      "description": "Compile .va file with -o flag",
+      "command": ["examples/math.va", "-o", "/tmp/bb_vaisto/Math.beam"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "Compiled",
+      "setup_dirs": ["/tmp/bb_vaisto"],
+      "cleanup": ["/tmp/bb_vaisto/Math.beam"]
+    },
+    {
+      "id": "POS-023",
+      "category": "positive",
+      "description": "Compile maybe example with ADT",
+      "command": ["examples/maybe.va"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "Compiled",
+      "cleanup": ["examples/Elixir.Maybe.beam"]
+    },
+    {
+      "id": "POS-024",
+      "category": "positive",
+      "description": "Help flag shows usage",
+      "command": ["--help"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "Usage:"
+    },
+    {
+      "id": "POS-025",
+      "category": "positive",
+      "description": "No args shows help",
+      "command": [],
+      "expect_exit": 0,
+      "expect_stdout_contains": "Usage:"
+    },
+    {
+      "id": "POS-026",
+      "category": "positive",
+      "description": "Init creates a valid package structure",
+      "command": ["init", "bb-test-pkg"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "Created",
+      "cleanup_dirs": ["bb-test-pkg"]
+    },
+    {
+      "id": "POS-027",
+      "category": "positive",
+      "description": "Eval negative number",
+      "command": ["--eval", "(- 0 5)"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "-5"
+    },
+    {
+      "id": "POS-028",
+      "category": "positive",
+      "description": "Eval lambda and apply",
+      "command": ["--eval", "(let [f (fn [x] (+ x 1))] (f 10))"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "11"
+    },
+
+    {
+      "id": "NEG-001",
+      "category": "negative",
+      "description": "Eval with syntax error (unmatched parens)",
+      "command": ["--eval", "((("],
+      "expect_exit": 1,
+      "expect_stderr_contains": "parse error",
+      "expect_no_stacktrace": true
+    },
+    {
+      "id": "NEG-002",
+      "category": "negative",
+      "description": "Eval with type error (int + string)",
+      "command": ["--eval", "(+ 1 \"hello\")"],
+      "expect_exit": 1,
+      "expect_stderr_contains": "type mismatch",
+      "expect_no_stacktrace": true
+    },
+    {
+      "id": "NEG-003",
+      "category": "negative",
+      "description": "Eval with undefined function",
+      "command": ["--eval", "(unknown-func 1 2)"],
+      "expect_exit": 1,
+      "expect_stderr_contains": "unknown function",
+      "expect_no_stacktrace": true
+    },
+    {
+      "id": "NEG-004",
+      "category": "negative",
+      "description": "Compile nonexistent file",
+      "command": ["nonexistent.va"],
+      "expect_exit": 1,
+      "expect_stderr_contains": "cannot read",
+      "expect_no_stacktrace": true
+    },
+    {
+      "id": "NEG-005",
+      "category": "negative",
+      "description": "Build from nonexistent directory",
+      "command": ["build", "/nonexistent/dir"],
+      "expect_exit": 1,
+      "expect_stderr_contains": "No .va files",
+      "expect_no_stacktrace": true
+    },
+    {
+      "id": "NEG-006",
+      "category": "negative",
+      "description": "Unknown CLI flag",
+      "command": ["--bogus-flag"],
+      "expect_exit": 1,
+      "expect_stderr_contains": "unknown option",
+      "expect_no_stacktrace": true
+    },
+    {
+      "id": "NEG-007",
+      "category": "negative",
+      "description": "Non-exhaustive pattern match",
+      "command": ["--eval", "(deftype Color (Red) (Green) (Blue)) (match (Red) [(Red) 1] [(Green) 2])"],
+      "expect_exit": 1,
+      "expect_stderr_contains": "non-exhaustive",
+      "expect_no_stacktrace": true
+    },
+    {
+      "id": "NEG-008",
+      "category": "negative",
+      "description": "Init with invalid package name (spaces)",
+      "command": ["init", "My Package"],
+      "expect_exit": 1,
+      "expect_stderr_contains": "kebab-case",
+      "expect_no_stacktrace": true
+    },
+    {
+      "id": "NEG-009",
+      "category": "negative",
+      "description": "Init with invalid package name (uppercase)",
+      "command": ["init", "UPPER"],
+      "expect_exit": 1,
+      "expect_stderr_contains": "kebab-case",
+      "expect_no_stacktrace": true
+    },
+    {
+      "id": "NEG-010",
+      "category": "negative",
+      "description": "Eval empty string should not crash",
+      "command": ["--eval", ""],
+      "expect_exit": 1,
+      "expect_no_stacktrace": true,
+      "notes": "BUG FOUND: Currently leaks UndefinedFunctionError stacktrace"
+    },
+    {
+      "id": "NEG-011",
+      "category": "negative",
+      "description": "Eval closing paren only",
+      "command": ["--eval", ")"],
+      "expect_exit": 1,
+      "expect_no_stacktrace": true
+    },
+    {
+      "id": "NEG-012",
+      "category": "negative",
+      "description": "Eval unclosed string literal",
+      "command": ["--eval", "\"hello"],
+      "expect_exit": 1,
+      "expect_no_stacktrace": true
+    },
+    {
+      "id": "NEG-013",
+      "category": "negative",
+      "description": "Compile non-.va extension file",
+      "command": ["/tmp/bb_vaisto_notva.txt"],
+      "expect_exit": 1,
+      "setup_files": {"/tmp/bb_vaisto_notva.txt": "hello"},
+      "expect_no_stacktrace": true,
+      "notes": "Should reject or warn about non-.va files"
+    },
+
+    {
+      "id": "SYS-001",
+      "category": "system",
+      "description": "Init then build produces working package",
+      "multi_step": [
+        {"command": ["init", "bb-sys-pkg"], "expect_exit": 0},
+        {"command": ["build"], "cwd_suffix": "bb-sys-pkg", "expect_exit": 0, "expect_stdout_contains": "Built"}
+      ],
+      "cleanup_dirs": ["bb-sys-pkg"]
+    },
+    {
+      "id": "SYS-002",
+      "category": "system",
+      "description": "Compile produces loadable .beam file",
+      "multi_step": [
+        {"command": ["examples/math.va", "-o", "/tmp/bb_vaisto_sys/Elixir.Math.beam"], "expect_exit": 0},
+        {"verify_beam": "/tmp/bb_vaisto_sys/Elixir.Math.beam"}
+      ],
+      "setup_dirs": ["/tmp/bb_vaisto_sys"],
+      "cleanup_dirs": ["/tmp/bb_vaisto_sys"]
+    },
+    {
+      "id": "SYS-003",
+      "category": "system",
+      "description": "Output .beam file is placed in correct directory",
+      "command": ["examples/math.va", "-o", "/tmp/bb_vaisto_place/Math.beam"],
+      "expect_exit": 0,
+      "expect_file_exists": "/tmp/bb_vaisto_place/Math.beam",
+      "setup_dirs": ["/tmp/bb_vaisto_place"],
+      "cleanup_dirs": ["/tmp/bb_vaisto_place"]
+    },
+    {
+      "id": "SYS-004",
+      "category": "system",
+      "description": "Init creates vaisto.toml and src/ directory",
+      "command": ["init", "bb-sys-init"],
+      "expect_exit": 0,
+      "expect_file_exists": "bb-sys-init/vaisto.toml",
+      "expect_dir_exists": "bb-sys-init/src",
+      "cleanup_dirs": ["bb-sys-init"]
+    },
+    {
+      "id": "SYS-005",
+      "category": "system",
+      "description": "Compile same file twice succeeds (idempotent)",
+      "multi_step": [
+        {"command": ["examples/math.va", "-o", "/tmp/bb_vaisto_idem/Math.beam"], "expect_exit": 0},
+        {"command": ["examples/math.va", "-o", "/tmp/bb_vaisto_idem/Math.beam"], "expect_exit": 0}
+      ],
+      "setup_dirs": ["/tmp/bb_vaisto_idem"],
+      "cleanup_dirs": ["/tmp/bb_vaisto_idem"]
+    },
+
+    {
+      "id": "INT-001",
+      "category": "integration",
+      "description": "Compiled .beam is loadable by BEAM VM",
+      "multi_step": [
+        {"command": ["examples/maybe.va", "-o", "/tmp/bb_vaisto_int/Elixir.Maybe.beam"], "expect_exit": 0},
+        {"beam_load": "/tmp/bb_vaisto_int/Elixir.Maybe.beam", "expect_module": "Elixir.Maybe"}
+      ],
+      "setup_dirs": ["/tmp/bb_vaisto_int"],
+      "cleanup_dirs": ["/tmp/bb_vaisto_int"]
+    },
+    {
+      "id": "INT-002",
+      "category": "integration",
+      "description": "Eval uses BEAM runtime correctly for arithmetic",
+      "command": ["--eval", "(+ 2147483647 1)"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "2147483648",
+      "notes": "BEAM handles arbitrary precision integers"
+    },
+    {
+      "id": "INT-003",
+      "category": "integration",
+      "description": "Eval string operations use BEAM binary correctly",
+      "command": ["--eval", "(str \"abc\" \"def\" \"ghi\")"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "abcdefghi"
+    },
+
+    {
+      "id": "LOAD-001",
+      "category": "load",
+      "description": "Compile 10 files sequentially",
+      "generate_files": {
+        "count": 10,
+        "template": "(defn f_{i} [x :int] :int (+ x {i}))",
+        "dir": "/tmp/bb_vaisto_load"
+      },
+      "command": ["build", "/tmp/bb_vaisto_load", "-o", "/tmp/bb_vaisto_load_out"],
+      "expect_exit": 0,
+      "setup_dirs": ["/tmp/bb_vaisto_load", "/tmp/bb_vaisto_load_out"],
+      "cleanup_dirs": ["/tmp/bb_vaisto_load", "/tmp/bb_vaisto_load_out"],
+      "max_duration_ms": 30000
+    },
+    {
+      "id": "LOAD-002",
+      "category": "load",
+      "description": "Eval 50 sequential expressions",
+      "command": ["--eval", "(do (+ 1 1) (+ 2 2) (+ 3 3) (+ 4 4) (+ 5 5) (+ 6 6) (+ 7 7) (+ 8 8) (+ 9 9) (+ 10 10))"],
+      "expect_exit": 0,
+      "expect_stdout_contains": "20",
+      "max_duration_ms": 10000
+    },
+
+    {
+      "id": "PERF-001",
+      "category": "performance",
+      "description": "Eval simple expression completes in under 5 seconds",
+      "command": ["--eval", "(+ 1 2)"],
+      "expect_exit": 0,
+      "max_duration_ms": 5000
+    },
+    {
+      "id": "PERF-002",
+      "category": "performance",
+      "description": "Single file compile completes in under 10 seconds",
+      "command": ["examples/math.va", "-o", "/tmp/bb_vaisto_perf/Math.beam"],
+      "expect_exit": 0,
+      "max_duration_ms": 10000,
+      "setup_dirs": ["/tmp/bb_vaisto_perf"],
+      "cleanup_dirs": ["/tmp/bb_vaisto_perf"]
+    },
+    {
+      "id": "PERF-003",
+      "category": "performance",
+      "description": "Help flag responds in under 2 seconds",
+      "command": ["--help"],
+      "expect_exit": 0,
+      "max_duration_ms": 2000
+    },
+
+    {
+      "id": "ABN-001",
+      "category": "abnormal",
+      "description": "Division by zero should not leak stacktrace",
+      "command": ["--eval", "(/ 1 0)"],
+      "expect_exit": 1,
+      "expect_no_stacktrace": true,
+      "notes": "BUG FOUND: Currently leaks ArithmeticError stacktrace"
+    },
+    {
+      "id": "ABN-002",
+      "category": "abnormal",
+      "description": "Eval with null byte in input",
+      "command": ["--eval", "(+ 1\u0000 2)"],
+      "expect_exit_nonzero_or_success": true,
+      "expect_no_stacktrace": true
+    },
+    {
+      "id": "ABN-003",
+      "category": "abnormal",
+      "description": "Eval with very long identifier",
+      "command_template": "--eval (LONG_ID 1 2)",
+      "long_id_length": 10000,
+      "expect_no_stacktrace": true,
+      "expect_no_crash": true
+    },
+    {
+      "id": "ABN-004",
+      "category": "abnormal",
+      "description": "Deeply nested expressions (200 levels)",
+      "command_generate": "deep_nest_200",
+      "expect_exit_nonzero_or_success": true,
+      "expect_no_stacktrace": true
+    },
+    {
+      "id": "ABN-005",
+      "category": "abnormal",
+      "description": "Eval with unicode in identifiers",
+      "command": ["--eval", "(let [über 42] über)"],
+      "expect_no_stacktrace": true
+    },
+    {
+      "id": "ABN-006",
+      "category": "abnormal",
+      "description": "Compile file with no read permissions",
+      "setup_file_noperm": "/tmp/bb_vaisto_noperm.va",
+      "command": ["/tmp/bb_vaisto_noperm.va"],
+      "expect_exit": 1,
+      "expect_no_stacktrace": true,
+      "cleanup": ["/tmp/bb_vaisto_noperm.va"]
+    },
+    {
+      "id": "ABN-007",
+      "category": "abnormal",
+      "description": "Output to read-only directory",
+      "command": ["examples/math.va", "-o", "/tmp/bb_vaisto_readonly/Math.beam"],
+      "setup_readonly_dir": "/tmp/bb_vaisto_readonly",
+      "expect_exit": 1,
+      "expect_no_stacktrace": true,
+      "cleanup_dirs": ["/tmp/bb_vaisto_readonly"]
+    },
+    {
+      "id": "ABN-008",
+      "category": "abnormal",
+      "description": "Compile binary/garbage file as .va",
+      "command": ["/tmp/bb_vaisto_binary.va"],
+      "setup_binary_file": "/tmp/bb_vaisto_binary.va",
+      "expect_no_crash": true,
+      "expect_no_stacktrace": true,
+      "cleanup": ["/tmp/bb_vaisto_binary.va"]
+    },
+    {
+      "id": "ABN-009",
+      "category": "abnormal",
+      "description": "Eval with emoji in string",
+      "command": ["--eval", "(str \"hello \" \"🌍\")"],
+      "expect_exit": 0,
+      "expect_no_stacktrace": true
+    },
+    {
+      "id": "ABN-010",
+      "category": "abnormal",
+      "description": "Init package that already exists",
+      "multi_step": [
+        {"command": ["init", "bb-abn-dup"], "expect_exit": 0},
+        {"command": ["init", "bb-abn-dup"], "expect_exit": 1, "expect_no_stacktrace": true}
+      ],
+      "cleanup_dirs": ["bb-abn-dup"]
+    }
+  ]
+}

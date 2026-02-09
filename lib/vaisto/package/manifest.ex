@@ -185,7 +185,7 @@ defmodule Vaisto.Package.Manifest do
 
   def validate_name(name) do
     cond do
-      not Regex.match?(~r/^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$/, name) ->
+      not Regex.match?(~r/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/, name) ->
         {:error, "package name `#{name}` must be lowercase kebab-case (e.g. \"my-package\")"}
 
       String.length(name) > 64 ->

@@ -147,6 +147,11 @@ defmodule Vaisto.CLI do
   end
 
   defp compile_file(input, output, backend) do
+    unless String.ends_with?(input, ".va") do
+      IO.puts(:stderr, "error: expected a .va file, got #{Path.extname(input) |> then(fn "" -> "no extension"; ext -> ext end)}: #{input}")
+      System.halt(1)
+    end
+
     case File.read(input) do
       {:ok, source} ->
         # Use path-based module naming
@@ -154,16 +159,10 @@ defmodule Vaisto.CLI do
 
         case compile(source, module_name, backend) do
           {:ok, _module, bytecode} when is_binary(bytecode) ->
-            # Ensure output directory exists
-            output |> Path.dirname() |> File.mkdir_p!()
-            File.write!(output, bytecode)
-            IO.puts("✓ Compiled #{input} → #{output}")
+            write_beam(input, output, bytecode)
 
           {:ok, _module, [{_mod, bytecode} | _rest]} when is_binary(bytecode) ->
-            # Elixir emitter returns list of {module, bytecode} tuples
-            output |> Path.dirname() |> File.mkdir_p!()
-            File.write!(output, bytecode)
-            IO.puts("✓ Compiled #{input} → #{output}")
+            write_beam(input, output, bytecode)
 
           {:error, reason} ->
             IO.puts(:stderr, format_error(input, reason))
@@ -177,11 +176,29 @@ defmodule Vaisto.CLI do
   end
 
   defp eval_code(code, backend) do
+    if String.trim(code) == "" do
+      IO.puts(:stderr, "error: empty expression")
+      System.halt(1)
+    end
+
     case compile(code, VaistoEval, backend) do
       {:ok, module, bytecode} ->
         # Load the module into the VM
         :code.load_binary(module, ~c"vaisto_eval", bytecode)
-        result = module.main()
+
+        result =
+          try do
+            module.main()
+          rescue
+            e in ArithmeticError ->
+              IO.puts(:stderr, "error: #{Exception.message(e)}")
+              System.halt(1)
+
+            e ->
+              IO.puts(:stderr, "error: runtime error: #{Exception.message(e)}")
+              System.halt(1)
+          end
+
         IO.puts(inspect(result))
         # Clean up
         :code.purge(module)
@@ -323,6 +340,17 @@ defmodule Vaisto.CLI do
     count = length(results)
     time_str = if elapsed, do: " in #{elapsed}ms", else: ""
     IO.puts("  Built #{count} module(s)#{time_str}")
+  end
+
+  defp write_beam(input, output, bytecode) do
+    with :ok <- output |> Path.dirname() |> File.mkdir_p(),
+         :ok <- File.write(output, bytecode) do
+      IO.puts("✓ Compiled #{input} → #{output}")
+    else
+      {:error, reason} ->
+        IO.puts(:stderr, "error: cannot write #{output}: #{:file.format_error(reason)}")
+        System.halt(1)
+    end
   end
 
   defp compile(source, module_name, backend) do

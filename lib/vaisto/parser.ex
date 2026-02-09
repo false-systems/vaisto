@@ -183,6 +183,23 @@ defmodule Vaisto.Parser do
     do_parse(rest, [{:map, map_contents, loc} | stack])
   end
 
+  defp do_parse([{"[", loc} | tail], stack) do
+    {rest, bracket_contents} = parse_bracket(tail, [], loc)
+    do_parse(rest, [{:bracket, bracket_contents} | stack])
+  end
+
+  defp do_parse([{")", loc} | _tail], _stack) do
+    raise "Unexpected closing parenthesis at line #{loc.line}, column #{loc.col}"
+  end
+
+  defp do_parse([{"}", loc} | _tail], _stack) do
+    raise "Unexpected closing brace at line #{loc.line}, column #{loc.col}"
+  end
+
+  defp do_parse([{"]", loc} | _tail], _stack) do
+    raise "Unexpected closing bracket at line #{loc.line}, column #{loc.col}"
+  end
+
   defp do_parse([{token, loc} | tail], stack) do
     do_parse(tail, [parse_token(token, loc) | stack])
   end
