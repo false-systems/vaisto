@@ -8,6 +8,8 @@ defmodule Vaisto.Parser do
   Each AST node includes location metadata for error reporting.
   """
 
+  alias Vaisto.Error
+
   # Location struct for source positions with span information
   defmodule Loc do
     @moduledoc """
@@ -399,10 +401,10 @@ defmodule Vaisto.Parser do
     {:if, condition, then_branch, else_branch, loc}
   end
   defp parse_if(args, loc) when length(args) < 3 do
-    {:error, "if requires 3 arguments: (if condition then else)", loc}
+    {:error, Error.new("if requires 3 arguments: (if condition then else)", span: Error.span_from_loc(loc)), loc}
   end
   defp parse_if(args, loc) when length(args) > 3 do
-    {:error, "if takes exactly 3 arguments, got #{length(args)}", loc}
+    {:error, Error.new("if takes exactly 3 arguments, got #{length(args)}", span: Error.span_from_loc(loc)), loc}
   end
 
   # (cond (test1 body1) (test2 body2) :else body3)
@@ -416,7 +418,7 @@ defmodule Vaisto.Parser do
         if rest == [] do
           body
         else
-          {:error, ":else clause must be the last clause in cond", loc}
+          {:error, Error.new(":else clause must be the last clause in cond", span: Error.span_from_loc(loc)), loc}
         end
 
       # (test body) clause
@@ -428,10 +430,10 @@ defmodule Vaisto.Parser do
 
       # Implicit else at the end? No, enforce :else.
       [] ->
-        {:error, "cond requires an :else clause as the last argument", loc}
+        {:error, Error.new("cond requires an :else clause as the last argument", span: Error.span_from_loc(loc)), loc}
 
       other ->
-        {:error, "invalid cond syntax: expected (test body) or :else body, got #{inspect(other)}", loc}
+        {:error, Error.new("invalid cond syntax: expected (test body) or :else body, got #{inspect(other)}", span: Error.span_from_loc(loc)), loc}
     end
   end
 
@@ -439,7 +441,7 @@ defmodule Vaisto.Parser do
   # (let [x 1 y 2] body1 body2 ...) → {:let, [{:x, 1}, {:y, 2}], {:do, [body1, body2, ...], loc}, loc}
   defp parse_let([{:bracket, bindings} | bodies], loc) when length(bodies) >= 1 do
     if rem(length(bindings), 2) != 0 do
-      {:error, "let bindings must be pairs: (let [name value ...] body)", loc}
+      {:error, Error.new("let bindings must be pairs: (let [name value ...] body)", span: Error.span_from_loc(loc)), loc}
     else
       pairs = bindings
         |> Enum.chunk_every(2)
@@ -452,10 +454,10 @@ defmodule Vaisto.Parser do
     end
   end
   defp parse_let([{:bracket, _bindings}], loc) do
-    {:error, "let requires a body expression", loc}
+    {:error, Error.new("let requires a body expression", span: Error.span_from_loc(loc)), loc}
   end
   defp parse_let(_, loc) do
-    {:error, "let requires bindings bracket: (let [name value ...] body)", loc}
+    {:error, Error.new("let requires bindings bracket: (let [name value ...] body)", span: Error.span_from_loc(loc)), loc}
   end
 
   # (. record :field) → {:field_access, record, field, loc}
@@ -467,13 +469,13 @@ defmodule Vaisto.Parser do
     {:field_access, record, field, loc}
   end
   defp parse_field_access([_record], loc) do
-    {:error, "field access requires a field name: (. record :field)", loc}
+    {:error, Error.new("field access requires a field name: (. record :field)", span: Error.span_from_loc(loc)), loc}
   end
   defp parse_field_access([], loc) do
-    {:error, "field access requires record and field: (. record :field)", loc}
+    {:error, Error.new("field access requires record and field: (. record :field)", span: Error.span_from_loc(loc)), loc}
   end
   defp parse_field_access(args, loc) when length(args) > 2 do
-    {:error, "field access takes 2 arguments, got #{length(args)}", loc}
+    {:error, Error.new("field access takes 2 arguments, got #{length(args)}", span: Error.span_from_loc(loc)), loc}
   end
 
   # Threading macro: (-> x (f a) (g b)) → (g (f x a) b)
@@ -501,7 +503,7 @@ defmodule Vaisto.Parser do
     single
   end
   defp parse_thread_first([], loc) do
-    {:error, "threading macro requires at least one value: (-> x (f) ...)", loc}
+    {:error, Error.new("threading macro requires at least one value: (-> x (f) ...)", span: Error.span_from_loc(loc)), loc}
   end
 
 
@@ -510,14 +512,14 @@ defmodule Vaisto.Parser do
   defp parse_match([expr | clauses], loc) when clauses != [] do
     case parse_clauses(clauses, loc) do
       {:ok, parsed_clauses} -> {:match, expr, parsed_clauses, loc}
-      {:error, _} = err -> err
+      {:error, _, _} = err -> err
     end
   end
   defp parse_match([_expr], loc) do
-    {:error, "match requires at least one clause: (match expr [pattern body] ...)", loc}
+    {:error, Error.new("match requires at least one clause: (match expr [pattern body] ...)", span: Error.span_from_loc(loc)), loc}
   end
   defp parse_match([], loc) do
-    {:error, "match requires expression and clauses: (match expr [pattern body] ...)", loc}
+    {:error, Error.new("match requires expression and clauses: (match expr [pattern body] ...)", span: Error.span_from_loc(loc)), loc}
   end
 
   defp parse_clauses(clauses, loc) do
@@ -526,13 +528,13 @@ defmodule Vaisto.Parser do
         body = wrap_bodies(bodies, loc)
         {:ok, {pattern, body}}
       {:bracket, [_pattern]} ->
-        {:error, "match clause requires a body: [pattern body]", loc}
+        {:error, Error.new("match clause requires a body: [pattern body]", span: Error.span_from_loc(loc)), loc}
       {:bracket, []} ->
-        {:error, "match clause cannot be empty: [pattern body]", loc}
+        {:error, Error.new("match clause cannot be empty: [pattern body]", span: Error.span_from_loc(loc)), loc}
       other ->
-        {:error, "match clause must be a bracket: [pattern body], got #{inspect(other)}", loc}
+        {:error, Error.new("match clause must be a bracket: [pattern body], got #{inspect(other)}", span: Error.span_from_loc(loc)), loc}
     end)
-    case Enum.find(results, &match?({:error, _, _}, &1)) do
+    case Enum.find(results, &match?({:error, %Error{}, _}, &1)) do
       nil -> {:ok, Enum.map(results, fn {:ok, c} -> c end)}
       err -> err
     end
@@ -542,11 +544,11 @@ defmodule Vaisto.Parser do
   defp parse_receive(clauses, loc) when clauses != [] do
     case parse_clauses(clauses, loc) do
       {:ok, parsed_clauses} -> {:receive, parsed_clauses, loc}
-      {:error, _} = err -> err
+      {:error, _, _} = err -> err
     end
   end
   defp parse_receive([], loc) do
-    {:error, "receive requires at least one clause: (receive [pattern body] ...)", loc}
+    {:error, Error.new("receive requires at least one clause: (receive [pattern body] ...)", span: Error.span_from_loc(loc)), loc}
   end
 
   defp parse_process([name, initial_state | handlers], loc) when handlers != [] do
@@ -556,17 +558,17 @@ defmodule Vaisto.Parser do
     {:process, name, initial_state, [], loc}
   end
   defp parse_process([_name], loc) do
-    {:error, "process requires initial state: (process name initial-state :msg handler ...)", loc}
+    {:error, Error.new("process requires initial state: (process name initial-state :msg handler ...)", span: Error.span_from_loc(loc)), loc}
   end
   defp parse_process([], loc) do
-    {:error, "process requires name and initial state", loc}
+    {:error, Error.new("process requires name and initial state", span: Error.span_from_loc(loc)), loc}
   end
 
   defp parse_supervise([strategy | children], loc) do
     {:supervise, strategy, children, loc}
   end
   defp parse_supervise([], loc) do
-    {:error, "supervise requires a strategy: (supervise :one_for_one child ...)", loc}
+    {:error, Error.new("supervise requires a strategy: (supervise :one_for_one child ...)", span: Error.span_from_loc(loc)), loc}
   end
 
   # Function definition: (def name [args] body)
@@ -578,13 +580,13 @@ defmodule Vaisto.Parser do
     {:defval, name, value, loc}
   end
   defp parse_def([_name], loc) do
-    {:error, "def requires a value: (def name value)", loc}
+    {:error, Error.new("def requires a value: (def name value)", span: Error.span_from_loc(loc)), loc}
   end
   defp parse_def([], loc) do
-    {:error, "def requires a name and value", loc}
+    {:error, Error.new("def requires a name and value", span: Error.span_from_loc(loc)), loc}
   end
   defp parse_def(args, loc) when length(args) > 3 do
-    {:error, "def has too many arguments", loc}
+    {:error, Error.new("def has too many arguments", span: Error.span_from_loc(loc)), loc}
   end
 
   # Multi-clause function definition
@@ -644,11 +646,11 @@ defmodule Vaisto.Parser do
 
   defp parse_defn_single(_name, [{:bracket, _params}], loc) do
     # No body - error
-    {:error, "defn requires a body expression", loc}
+    {:error, Error.new("defn requires a body expression", span: Error.span_from_loc(loc)), loc}
   end
 
   defp parse_defn_single(_name, _rest, loc) do
-    {:error, "Invalid defn syntax", loc}
+    {:error, Error.new("Invalid defn syntax", span: Error.span_from_loc(loc)), loc}
   end
 
   # Wrap multiple body expressions in a do block
@@ -731,12 +733,12 @@ defmodule Vaisto.Parser do
           {:call, ctor_name, args, _loc} ->
             {ctor_name, args}
           other ->
-            {:error, "Invalid variant syntax: #{inspect(other)}"}
+            {:error, Error.new("Invalid variant syntax: #{inspect(other)}")}
         end)
         # Check for errors
-        case Enum.find(parsed_variants, &match?({:error, _}, &1)) do
+        case Enum.find(parsed_variants, &match?({:error, %Error{}}, &1)) do
           nil -> {:deftype, name, {:sum, parsed_variants}, loc}
-          {:error, msg} -> {:error, msg, loc}
+          {:error, %Error{} = err} -> {:error, err, loc}
         end
 
       # Legacy: (deftype point x y) → untyped product fields

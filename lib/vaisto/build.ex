@@ -27,6 +27,7 @@ defmodule Vaisto.Build do
   require Logger
 
   alias Vaisto.Build.{ModuleNaming, DependencyResolver, Compiler, Context}
+  alias Vaisto.Error
   alias Vaisto.Package.{Manifest, Namespace}
   alias Vaisto.Interface
 
@@ -100,7 +101,7 @@ defmodule Vaisto.Build do
         {:error, reason}
 
       :none ->
-        {:error, "no vaisto.toml found in #{project_dir}"}
+        {:error, Error.new("no vaisto.toml found in #{project_dir}")}
     end
   end
 
@@ -151,7 +152,7 @@ defmodule Vaisto.Build do
             {:ok, {name, dep_dir, nil, roots}}
 
           {:error, reason} ->
-            {:error, "dependency `#{name}`: #{reason}"}
+            {:error, Error.new("dependency `#{name}`: #{Error.message(reason)}")}
         end
       end)
 
@@ -201,7 +202,7 @@ defmodule Vaisto.Build do
     all_files = project_files ++ dep_files
 
     if all_files == [] do
-      {:error, "no .va files found in source directories"}
+      {:error, Error.new("no .va files found in source directories")}
     else
       {:ok, all_files, all_roots}
     end
@@ -257,7 +258,7 @@ defmodule Vaisto.Build do
       |> Enum.reject(&String.ends_with?(&1, @prelude_filename))
 
     if files == [] do
-      {:error, "No .va files found in #{dir}"}
+      {:error, Error.new("No .va files found in #{dir}")}
     else
       {:ok, files}
     end

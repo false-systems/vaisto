@@ -1009,7 +1009,11 @@ defmodule Vaisto.TypeChecker do
 
   # Handle parse errors (propagate them as type errors with location info)
   # Parse error - location is stripped by generic handler and added via with_loc
-  defp check_impl({:error, msg}, _env) do
+  defp check_impl({:error, %Error{} = error}, _env) do
+    {:error, error}
+  end
+
+  defp check_impl({:error, msg}, _env) when is_binary(msg) do
     {:error, Errors.parse_error(msg)}
   end
 

@@ -63,7 +63,7 @@ defmodule Vaisto.ParserTest do
 
     test "cond requires else" do
       code = "(cond [(> x 0) :pos])"
-      assert {:error, "cond requires an :else clause as the last argument", _} = Parser.parse(code)
+      assert {:error, %Vaisto.Error{message: "cond requires" <> _}, _} = Parser.parse(code)
     end
 
     test "parses process definition" do
