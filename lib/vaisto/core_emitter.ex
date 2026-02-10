@@ -29,27 +29,53 @@ defmodule Vaisto.CoreEmitter do
     load? = Keyword.get(opts, :load, true)
 
     try do
-      core_ast = to_core(typed_ast, module_name)
+      case to_core(typed_ast, module_name) do
+        {:multi, sub_modules, main_ast} ->
+          # Compile sub-modules first (e.g., process modules)
+          sub_results = Enum.map(sub_modules, fn {mod, ast} ->
+            compile_core(ast, mod, load?)
+          end)
 
-      case :compile.forms(core_ast, [:from_core, :binary, :return_errors]) do
-        {:ok, ^module_name, binary} ->
-          if load?, do: :code.load_binary(module_name, ~c"vaisto", binary)
-          {:ok, module_name, binary}
+          case Enum.find(sub_results, &match?({:error, _}, &1)) do
+            {:error, _} = err ->
+              err
 
-        {:ok, ^module_name, binary, _warnings} ->
-          if load?, do: :code.load_binary(module_name, ~c"vaisto", binary)
-          {:ok, module_name, binary}
+            nil when main_ast != nil ->
+              compile_core(main_ast, module_name, load?)
 
-        {:error, errors, _warnings} ->
-          formatted = try do
-            format_errors(errors)
-          rescue
-            _ -> "Internal compiler error: #{inspect(errors, limit: :infinity)}"
+            nil ->
+              # No main module — return first sub-module result
+              case hd(sub_results) do
+                {:ok, _mod, binary} -> {:ok, module_name, binary}
+                error -> error
+              end
           end
-          {:error, Error.new("BEAM compilation failed", note: formatted)}
+
+        core_ast ->
+          compile_core(core_ast, module_name, load?)
       end
     rescue
       e -> {:error, Error.new("compilation error", note: Exception.message(e))}
+    end
+  end
+
+  defp compile_core(core_ast, module_name, load?) do
+    case :compile.forms(core_ast, [:from_core, :binary, :return_errors]) do
+      {:ok, ^module_name, binary} ->
+        if load?, do: :code.load_binary(module_name, ~c"vaisto", binary)
+        {:ok, module_name, binary}
+
+      {:ok, ^module_name, binary, _warnings} ->
+        if load?, do: :code.load_binary(module_name, ~c"vaisto", binary)
+        {:ok, module_name, binary}
+
+      {:error, errors, _warnings} ->
+        formatted = try do
+          format_errors(errors)
+        rescue
+          _ -> "Internal compiler error: #{inspect(errors, limit: :infinity)}"
+        end
+        {:error, Error.new("BEAM compilation failed", note: formatted)}
     end
   end
 
@@ -82,17 +108,38 @@ defmodule Vaisto.CoreEmitter do
 
   # Module with function definitions or process
   def to_core({:module, forms}, module_name) do
-    # Check if this module defines a process
-    process_def = Enum.find(forms, fn
+    process_defs = Enum.filter(forms, fn
       {:process, _, _, _, _} -> true
       _ -> false
     end)
 
-    if process_def do
-      {:process, name, _init, handlers, _type} = process_def
-      # Scope process module under parent to prevent name collisions in async tests
-      process_module = scoped_process_name(name, module_name)
-      to_core_process(process_module, handlers)
+    if process_defs != [] do
+      # Build sub-module ASTs for each process
+      sub_modules = Enum.map(process_defs, fn {:process, name, _init, handlers, _type} ->
+        process_module = scoped_process_name(name, module_name)
+        {name, process_module, to_core_process(process_module, handlers)}
+      end)
+
+      # Map process names → scoped module names for call rewriting
+      process_modules = Map.new(sub_modules, fn {name, mod, _ast} -> {name, mod} end)
+
+      # Remaining forms (everything except process definitions)
+      remaining = Enum.reject(forms, fn
+        {:process, _, _, _, _} -> true
+        _ -> false
+      end)
+
+      # Rewrite calls to process names as qualified start_link calls
+      remaining = rewrite_process_calls(remaining, process_modules)
+
+      sub_module_asts = Enum.map(sub_modules, fn {_name, mod, ast} -> {mod, ast} end)
+
+      if remaining == [] do
+        {:multi, sub_module_asts, nil}
+      else
+        main_ast = to_core_module_forms(remaining, module_name)
+        {:multi, sub_module_asts, main_ast}
+      end
     else
       to_core_module_forms(forms, module_name)
     end
@@ -254,6 +301,32 @@ defmodule Vaisto.CoreEmitter do
       fun_defs ++ main_defs ++ constructor_fns
     )
   end
+
+  # --- Process call rewriting ---
+  # Rewrites calls to process names (e.g., (counter 0)) into qualified
+  # start_link calls (e.g., Counter.Counter.start_link(0)) so the existing
+  # qualified-call emission handles them.
+
+  defp rewrite_process_calls(forms, process_modules) when is_list(forms) do
+    Enum.map(forms, &rewrite_process_calls(&1, process_modules))
+  end
+
+  defp rewrite_process_calls({:call, name, args, loc_or_type}, process_modules) when is_atom(name) do
+    if Map.has_key?(process_modules, name) do
+      mod = process_modules[name]
+      {:call, {:qualified, mod, :start_link},
+       Enum.map(args, &rewrite_process_calls(&1, process_modules)), loc_or_type}
+    else
+      {:call, name, Enum.map(args, &rewrite_process_calls(&1, process_modules)), loc_or_type}
+    end
+  end
+
+  defp rewrite_process_calls({:supervise, strategy, children, type}, process_modules) do
+    {:supervise, strategy,
+     Enum.map(children, &rewrite_process_calls(&1, process_modules)), type}
+  end
+
+  defp rewrite_process_calls(other, _process_modules), do: other
 
   # --- Process compilation ---
   # Generates a raw BEAM process with start_link/1 and loop/1
