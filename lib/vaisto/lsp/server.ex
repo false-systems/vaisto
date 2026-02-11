@@ -53,7 +53,8 @@ defmodule Vaisto.LSP.Server do
 
     # Start reading from input
     if input == :stdio do
-      spawn_link(fn -> read_loop(self()) end)
+      server = self()
+      spawn_link(fn -> read_loop(server) end)
     end
 
     {:ok, state}

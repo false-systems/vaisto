@@ -138,10 +138,11 @@ defmodule Vaisto.LSP.References do
              |> Enum.slice(start_idx..end_idx)
              |> Enum.join()
 
-      if word == "" do
-        :not_found
-      else
-        {:ok, word, start_idx + 1, end_idx + 2}  # Convert back to 1-indexed, end is exclusive
+      first_char = String.at(word, 0) || ""
+      cond do
+        word == "" -> :not_found
+        first_char =~ ~r/[0-9]/ -> :not_found  # Number literals aren't renameable
+        true -> {:ok, word, start_idx + 1, end_idx + 2}  # Convert back to 1-indexed, end is exclusive
       end
     end
   end
