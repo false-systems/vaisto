@@ -1096,6 +1096,25 @@ defmodule Vaisto.TypeChecker do
   defp extract_class_parts({:class, _name, tvar_ids, method_sigs}),
     do: {tvar_ids, method_sigs, %{}}
 
+  # Standalone deftype_deriving (single expression, not in a module)
+  defp check_impl({:deftype_deriving, name, type_def, classes}, env) do
+    loc = %Vaisto.Parser.Loc{}
+    case check({:deftype, name, type_def, loc}, env) do
+      {:ok, _type, typed_deftype} ->
+        new_env = update_env_from_typed_form(typed_deftype, env)
+        results = Enum.map(classes, fn class ->
+          synthesize_and_check_instance(class, name, type_def, loc, new_env)
+        end)
+        case Enum.find(results, &match?({:error, _}, &1)) do
+          {:error, _} = err -> err
+          nil ->
+            typed_instances = Enum.map(results, fn {:ok, _t, typed} -> typed end)
+            {:ok, :module, {:module, [typed_deftype | typed_instances]}}
+        end
+      {:error, _} = err -> err
+    end
+  end
+
   # Handle parse errors (propagate them as type errors with location info)
   # Parse error - location is stripped by generic handler and added via with_loc
   defp check_impl({:error, %Error{} = error}, _env) do
@@ -2275,6 +2294,12 @@ defmodule Vaisto.TypeChecker do
         {:instance, class_name, for_type, _methods} ->
           collect_instance_signature(class_name, for_type, acc_env)
 
+        {:deftype_deriving, name, type_def, classes, %Vaisto.Parser.Loc{}} ->
+          expand_deriving_signatures(name, type_def, classes, acc_env)
+
+        {:deftype_deriving, name, type_def, classes} ->
+          expand_deriving_signatures(name, type_def, classes, acc_env)
+
         _ ->
           acc_env
       end
@@ -2454,11 +2479,25 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
+  defp expand_deriving_signatures(name, type_def, classes, env) do
+    env_with_type = collect_deftype_signature(name, type_def, env)
+    Enum.reduce(classes, env_with_type, fn class_name, acc ->
+      collect_instance_signature(class_name, name, acc)
+    end)
+  end
+
   defp check_module_forms([], _env, acc, errors) do
     case errors do
       [] -> {:ok, :module, {:module, Enum.reverse(acc)}}
       _ -> {:error, Enum.reverse(errors)}
     end
+  end
+
+  defp check_module_forms([{:deftype_deriving, name, type_def, classes, loc} | rest], env, acc, errors) do
+    check_deftype_deriving(name, type_def, classes, loc, env, rest, acc, errors)
+  end
+  defp check_module_forms([{:deftype_deriving, name, type_def, classes} | rest], env, acc, errors) do
+    check_deftype_deriving(name, type_def, classes, %Vaisto.Parser.Loc{}, env, rest, acc, errors)
   end
 
   defp check_module_forms([form | rest], env, acc, errors) do
@@ -2472,6 +2511,57 @@ defmodule Vaisto.TypeChecker do
         # Continue checking remaining forms, accumulate error
         check_module_forms(rest, env, acc, [err | errors])
     end
+  end
+
+  # Deriving: check the deftype, then synthesize and check each derived instance
+  defp check_deftype_deriving(name, type_def, classes, loc, env, rest, acc, errors) do
+    case check({:deftype, name, type_def, loc}, env) do
+      {:ok, _type, typed_deftype} ->
+        new_env = update_env_from_typed_form(typed_deftype, env)
+
+        {instance_acc, err_acc} = Enum.reduce(classes, {[], errors}, fn class, {insts, errs} ->
+          case synthesize_and_check_instance(class, name, type_def, loc, new_env) do
+            {:ok, _type, typed_inst} -> {[typed_inst | insts], errs}
+            {:error, err} -> {insts, [err | errs]}
+          end
+        end)
+
+        new_acc = Enum.reverse(instance_acc) ++ [typed_deftype | acc]
+        check_module_forms(rest, new_env, new_acc, err_acc)
+
+      {:error, err} ->
+        check_module_forms(rest, env, acc, [err | errors])
+    end
+  end
+
+  # Eq: derivable for all types — uses BEAM structural equality
+  defp synthesize_and_check_instance(:Eq, for_type, _type_def, loc, env) do
+    methods = [{:eq, [:x, :y], {:call, :==, [:x, :y], loc}}]
+    check({:instance, :Eq, for_type, methods, loc}, env)
+  end
+
+  # Show: derivable for enum-like sum types only (all variants have 0 fields)
+  defp synthesize_and_check_instance(:Show, for_type, {:sum, variants}, loc, env) do
+    has_fields? = Enum.any?(variants, fn {_ctor, fields} -> fields != [] end)
+
+    if has_fields? do
+      {:error, Error.new("cannot derive Show for `#{for_type}`: variants with fields require a manual instance")}
+    else
+      match_clauses = Enum.map(variants, fn {ctor_name, []} ->
+        {{:call, ctor_name, [], loc}, {:string, Atom.to_string(ctor_name)}}
+      end)
+      match_expr = {:match, :x, match_clauses, loc}
+      methods = [{:show, [:x], match_expr}]
+      check({:instance, :Show, for_type, methods, loc}, env)
+    end
+  end
+
+  defp synthesize_and_check_instance(:Show, for_type, {:product, _}, _loc, _env) do
+    {:error, Error.new("cannot derive Show for record type `#{for_type}`")}
+  end
+
+  defp synthesize_and_check_instance(class, _for_type, _type_def, _loc, _env) do
+    {:error, Error.new("cannot derive `#{class}`: only Eq and Show are derivable")}
   end
 
   # Extract env updates from a typed form

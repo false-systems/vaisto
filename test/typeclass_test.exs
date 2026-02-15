@@ -500,4 +500,194 @@ defmodule Vaisto.TypeClassTest do
       assert true == Runner.call(mod, :main)
     end
   end
+
+  # =========================================================================
+  # Parsing — Deriving
+  # =========================================================================
+
+  describe "parsing deriving" do
+    test "sum type with deriving one class" do
+      ast = Parser.parse("(deftype Color (Red) (Green) deriving [Eq])")
+      assert {:deftype_deriving, :Color, {:sum, _variants}, [:Eq], _loc} = ast
+    end
+
+    test "sum type with deriving multiple classes" do
+      ast = Parser.parse("(deftype Color (Red) deriving [Eq Show])")
+      assert {:deftype_deriving, :Color, {:sum, _}, [:Eq, :Show], _loc} = ast
+    end
+
+    test "product type with deriving" do
+      ast = Parser.parse("(deftype Point [x :int y :int] deriving [Eq])")
+      assert {:deftype_deriving, :Point, {:product, _}, [:Eq], _loc} = ast
+    end
+
+    test "sum type without deriving unchanged" do
+      ast = Parser.parse("(deftype Color (Red) (Green))")
+      assert {:deftype, :Color, {:sum, _}, _loc} = ast
+    end
+  end
+
+  # =========================================================================
+  # Type Checking — Deriving
+  # =========================================================================
+
+  describe "type checking deriving" do
+    test "enum with deriving Eq type checks" do
+      code = """
+      (deftype Color (Red) (Green) (Blue) deriving [Eq])
+      (eq (Red) (Blue))
+      """
+      ast = Parser.parse(code)
+      assert {:ok, :module, _} = TypeChecker.check(ast)
+    end
+
+    test "enum with deriving Show type checks" do
+      code = """
+      (deftype Color (Red) (Green) (Blue) deriving [Show])
+      (show (Green))
+      """
+      ast = Parser.parse(code)
+      assert {:ok, :module, _} = TypeChecker.check(ast)
+    end
+
+    test "enum with deriving [Eq Show] type checks both" do
+      code = """
+      (deftype Color (Red) (Green) (Blue) deriving [Eq Show])
+      (eq (Red) (Blue))
+      (show (Green))
+      """
+      ast = Parser.parse(code)
+      assert {:ok, :module, _} = TypeChecker.check(ast)
+    end
+
+    test "parametric ADT deriving Eq works" do
+      code = """
+      (deftype Maybe (Just v) (Nothing) deriving [Eq])
+      (eq (Just 1) (Nothing))
+      """
+      ast = Parser.parse(code)
+      assert {:ok, :module, _} = TypeChecker.check(ast)
+    end
+
+    test "parametric ADT deriving Show errors (has fields)" do
+      code = """
+      (deftype Maybe (Just v) (Nothing) deriving [Show])
+      (show (Nothing))
+      """
+      ast = Parser.parse(code)
+      result = TypeChecker.check(ast)
+      assert {:error, _} = result
+    end
+
+    test "record deriving Eq works" do
+      code = """
+      (deftype Point [x :int y :int] deriving [Eq])
+      (eq (Point 1 2) (Point 3 4))
+      """
+      ast = Parser.parse(code)
+      assert {:ok, :module, _} = TypeChecker.check(ast)
+    end
+
+    test "record deriving Show errors" do
+      code = """
+      (deftype Point [x :int y :int] deriving [Show])
+      """
+      ast = Parser.parse(code)
+      result = TypeChecker.check(ast)
+      assert {:error, _} = result
+    end
+
+    test "unknown class deriving errors" do
+      code = """
+      (deftype Color (Red) (Blue) deriving [Foo])
+      """
+      ast = Parser.parse(code)
+      result = TypeChecker.check(ast)
+      assert {:error, _} = result
+    end
+  end
+
+  # =========================================================================
+  # Code Generation + Runtime — Deriving
+  # =========================================================================
+
+  describe "codegen: deriving Eq" do
+    test "derived (eq (Red) (Red)) => true" do
+      code = """
+      (deftype Color (Red) (Green) (Blue) deriving [Eq])
+      (eq (Red) (Red))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :DeriveEqTrue, backend: :core)
+      assert true == Runner.call(mod, :main)
+    end
+
+    test "derived (eq (Red) (Blue)) => false" do
+      code = """
+      (deftype Color (Red) (Green) (Blue) deriving [Eq])
+      (eq (Red) (Blue))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :DeriveEqFalse, backend: :core)
+      assert false == Runner.call(mod, :main)
+    end
+
+    test "derived eq on record" do
+      code = """
+      (deftype Point [x :int y :int] deriving [Eq])
+      (eq (Point 1 2) (Point 1 2))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :DeriveEqRecord, backend: :core)
+      assert true == Runner.call(mod, :main)
+    end
+
+    test "derived eq on record (not equal)" do
+      code = """
+      (deftype Point [x :int y :int] deriving [Eq])
+      (eq (Point 1 2) (Point 3 4))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :DeriveEqRecordNe, backend: :core)
+      assert false == Runner.call(mod, :main)
+    end
+  end
+
+  describe "codegen: deriving Show" do
+    test "derived (show (Green)) => \"Green\"" do
+      code = """
+      (deftype Color (Red) (Green) (Blue) deriving [Show])
+      (show (Green))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :DeriveShowGreen, backend: :core)
+      assert "Green" == Runner.call(mod, :main)
+    end
+
+    test "derived show each variant" do
+      code = """
+      (deftype Dir (North) (South) deriving [Show])
+      (str (show (North)) "," (show (South)))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :DeriveShowAll, backend: :core)
+      assert "North,South" == Runner.call(mod, :main)
+    end
+  end
+
+  describe "codegen: deriving both Eq and Show" do
+    test "derived Eq + Show combined" do
+      code = """
+      (deftype Status (Active) (Inactive) deriving [Eq Show])
+      (str (show (Active)) ":" (if (eq (Active) (Inactive)) "yes" "no"))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :DeriveBoth, backend: :core)
+      assert "Active:no" == Runner.call(mod, :main)
+    end
+  end
+
+  describe "codegen: derived neq via default method" do
+    test "derived (neq (Red) (Blue)) => true" do
+      code = """
+      (deftype Color (Red) (Green) (Blue) deriving [Eq])
+      (neq (Red) (Blue))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :DeriveNeqDefault, backend: :core)
+      assert true == Runner.call(mod, :main)
+    end
+  end
 end

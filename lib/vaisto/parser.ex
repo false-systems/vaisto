@@ -730,6 +730,14 @@ defmodule Vaisto.Parser do
     {:fn, params, body, loc}
   end
 
+  # Product type with deriving: (deftype Point [x :int y :int] deriving [Eq])
+  defp parse_deftype([name, {:bracket, fields}, :deriving, {:bracket, classes}], loc) do
+    field_pairs = fields
+      |> Enum.chunk_every(2)
+      |> Enum.map(fn [field_name, type] -> {field_name, type} end)
+    {:deftype_deriving, name, {:product, field_pairs}, classes, loc}
+  end
+
   # Product type (record): (deftype Point [x :int y :int])
   # → {:deftype, :Point, {:product, [{:x, :int}, {:y, :int}]}, loc}
   defp parse_deftype([name, {:bracket, fields}], loc) do
@@ -744,11 +752,13 @@ defmodule Vaisto.Parser do
   # → {:deftype, :Result, {:sum, [{:Ok, [:v]}, {:Error, [:msg]}]}, loc}
   # Each variant is parsed as {:call, CtorName, [type_params], loc}
   defp parse_deftype([name | rest], loc) when is_list(rest) and length(rest) > 0 do
-    # Check if first element looks like a variant (parsed as a call)
-    case rest do
+    # Split off trailing deriving clause if present
+    {variant_rest, derive_classes} = split_deriving(rest)
+
+    case variant_rest do
       [{:call, _, _, _} | _] ->
         # Sum type: parse variants from call AST nodes
-        parsed_variants = Enum.map(rest, fn
+        parsed_variants = Enum.map(variant_rest, fn
           {:call, ctor_name, args, _loc} ->
             {ctor_name, args}
           other ->
@@ -756,7 +766,12 @@ defmodule Vaisto.Parser do
         end)
         # Check for errors
         case Enum.find(parsed_variants, &match?({:error, %Error{}}, &1)) do
-          nil -> {:deftype, name, {:sum, parsed_variants}, loc}
+          nil ->
+            if derive_classes == [] do
+              {:deftype, name, {:sum, parsed_variants}, loc}
+            else
+              {:deftype_deriving, name, {:sum, parsed_variants}, derive_classes, loc}
+            end
           {:error, %Error{} = err} -> {:error, err, loc}
         end
 
@@ -764,6 +779,13 @@ defmodule Vaisto.Parser do
       fields ->
         field_pairs = Enum.map(fields, fn field -> {field, :any} end)
         {:deftype, name, {:product, field_pairs}, loc}
+    end
+  end
+
+  defp split_deriving(rest) do
+    case Enum.split(rest, -2) do
+      {variants, [:deriving, {:bracket, classes}]} when variants != [] -> {variants, classes}
+      _ -> {rest, []}
     end
   end
 
