@@ -373,4 +373,131 @@ defmodule Vaisto.TypeClassTest do
       assert false == Runner.call(mod, :main)
     end
   end
+
+  # =========================================================================
+  # Type Checking — ADT Instances
+  # =========================================================================
+
+  describe "type checking ADT instances" do
+    test "ADT instance type checks" do
+      code = """
+      (deftype Color (Red) (Green) (Blue))
+      (instance Eq Color
+        (eq [x y] (== x y)))
+      (eq (Red) (Blue))
+      """
+      ast = Parser.parse(code)
+      assert {:ok, :module, _typed_ast} = TypeChecker.check(ast)
+    end
+
+    test "ADT neq works via default method" do
+      code = """
+      (deftype Color (Red) (Green) (Blue))
+      (instance Eq Color
+        (eq [x y] (== x y)))
+      (neq (Red) (Blue))
+      """
+      ast = Parser.parse(code)
+      assert {:ok, :module, _typed_ast} = TypeChecker.check(ast)
+    end
+
+    test "parametric ADT instance type checks" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (instance Eq Maybe
+        (eq [x y] (== x y)))
+      (eq (Just 1) (Just 2))
+      """
+      ast = Parser.parse(code)
+      assert {:ok, :module, _typed_ast} = TypeChecker.check(ast)
+    end
+
+    test "missing ADT instance errors" do
+      code = """
+      (deftype Color (Red) (Green) (Blue))
+      (eq (Red) (Blue))
+      """
+      ast = Parser.parse(code)
+      result = TypeChecker.check(ast)
+      assert {:error, _} = result
+    end
+
+    test "ADT instance resolves to class_call with atom key" do
+      code = """
+      (deftype Color (Red) (Green) (Blue))
+      (instance Eq Color
+        (eq [x y] (== x y)))
+      (eq (Red) (Blue))
+      """
+      ast = Parser.parse(code)
+      {:ok, :module, {:module, forms}} = TypeChecker.check(ast)
+      # The last form should be a class_call with :Color as the instance key
+      last = List.last(forms)
+      assert {:class_call, :Eq, :eq, :Color, _args, :bool} = last
+    end
+  end
+
+  # =========================================================================
+  # Code Generation + Runtime — ADT Instances
+  # =========================================================================
+
+  describe "codegen: ADT eq" do
+    test "(eq (Red) (Red)) => true" do
+      code = """
+      (deftype Color (Red) (Green) (Blue))
+      (instance Eq Color
+        (eq [x y] (== x y)))
+      (eq (Red) (Red))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :AdtEqTrue, backend: :core)
+      assert true == Runner.call(mod, :main)
+    end
+
+    test "(eq (Red) (Blue)) => false" do
+      code = """
+      (deftype Color (Red) (Green) (Blue))
+      (instance Eq Color
+        (eq [x y] (== x y)))
+      (eq (Red) (Blue))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :AdtEqFalse, backend: :core)
+      assert false == Runner.call(mod, :main)
+    end
+
+    test "(neq (Red) (Blue)) => true via default" do
+      code = """
+      (deftype Color (Red) (Green) (Blue))
+      (instance Eq Color
+        (eq [x y] (== x y)))
+      (neq (Red) (Blue))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :AdtNeqDefault, backend: :core)
+      assert true == Runner.call(mod, :main)
+    end
+
+    test "show ADT with match" do
+      code = """
+      (deftype Color (Red) (Green) (Blue))
+      (instance Show Color
+        (show [x] (match x
+          [(Red) "red"]
+          [(Green) "green"]
+          [(Blue) "blue"])))
+      (show (Green))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :AdtShowMatch, backend: :core)
+      assert "green" == Runner.call(mod, :main)
+    end
+
+    test "parametric ADT eq" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (instance Eq Maybe
+        (eq [x y] (== x y)))
+      (eq (Just 1) (Just 1))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :AdtParamEq, backend: :core)
+      assert true == Runner.call(mod, :main)
+    end
+  end
 end

@@ -1051,7 +1051,9 @@ defmodule Vaisto.TypeChecker do
           all_methods = methods ++ injected
 
           # Type-check each method body with the concrete type
-          subst = Map.new(tvar_ids, fn id -> {id, for_type} end)
+          # Resolve ADT name atom to full type for substitution
+          resolved_type = resolve_instance_type(for_type, env)
+          subst = Map.new(tvar_ids, fn id -> {id, resolved_type} end)
           method_sig_map = Map.new(method_sigs)
 
           typed_methods = Enum.map(all_methods, fn {method_name, params, body} ->
@@ -1349,15 +1351,16 @@ defmodule Vaisto.TypeChecker do
     Enum.reduce_while(constraints, {:ok, nil}, fn {class_name, constraint_type}, _acc ->
       # The constraint type should be concrete after unification with args
       concrete_type = resolve_constraint_type(constraint_type, arg_types)
+      instance_key = normalize_instance_type(concrete_type)
 
       cond do
         # Still a type variable — can't resolve yet, emit as regular call
         match?({:tvar, _}, concrete_type) ->
           {:halt, {:ok, ret_type, {:call, method_name, typed_args, ret_type}}}
 
-        # Check instance exists
-        Map.has_key?(instances, {class_name, concrete_type}) ->
-          {:cont, {:ok, {:class_call, class_name, method_name, concrete_type, typed_args, ret_type}}}
+        # Check instance exists (use normalized key for ADT/record types)
+        Map.has_key?(instances, {class_name, instance_key}) ->
+          {:cont, {:ok, {:class_call, class_name, method_name, instance_key, typed_args, ret_type}}}
 
         true ->
           {:halt, {:error, Error.new("no instance of `#{class_name}` for type `#{Vaisto.TypeSystem.Core.format_type(concrete_type)}`")}}
@@ -1381,6 +1384,20 @@ defmodule Vaisto.TypeChecker do
     first_arg_type
   end
   defp resolve_constraint_type(concrete, _arg_types), do: concrete
+
+  # Outward normalization: full type → name atom (for registry lookup, emitter dict names)
+  defp normalize_instance_type({:sum, name, _}), do: name
+  defp normalize_instance_type({:record, name, _}), do: name
+  defp normalize_instance_type(other), do: other
+
+  # Inward normalization: name atom → full type (for type-checking instance method bodies)
+  defp resolve_instance_type(for_type, env) when is_atom(for_type) do
+    case Map.get(env, for_type) do
+      {:sum, _, _} = sum -> instantiate_sum_tvars(sum)
+      {:record, _, _} = rec -> rec
+      _ -> for_type
+    end
+  end
 
   defp lookup_function(name, env) do
     case Map.get(env, name) do
@@ -2421,8 +2438,9 @@ defmodule Vaisto.TypeChecker do
     case class_def do
       tuple when is_tuple(tuple) and elem(tuple, 0) == :class ->
         {tvar_ids, method_sigs, _defaults} = extract_class_parts(class_def)
-        # Substitute concrete type for tvars in method signatures
-        subst = Map.new(tvar_ids, fn id -> {id, for_type} end)
+        # Resolve ADT name atom to full type for substitution
+        resolved_type = resolve_instance_type(for_type, env)
+        subst = Map.new(tvar_ids, fn id -> {id, resolved_type} end)
         concrete_methods = Map.new(method_sigs, fn {method_name, method_type} ->
           {method_name, Vaisto.TypeSystem.Core.apply_subst(subst, method_type)}
         end)

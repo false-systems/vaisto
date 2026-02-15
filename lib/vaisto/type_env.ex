@@ -45,7 +45,7 @@ defmodule Vaisto.TypeEnv do
         {:neq, {:fn, [{:tvar, 0}, {:tvar, 0}], :bool}}
       ], %{
         neq: {:default, [:x, :y],
-          {:if, {:call, :eq, [:x, :y], nil}, false, true, nil}}
+          {:if, {:call, :eq, [:x, :y], %Vaisto.Parser.Loc{}}, false, true, %Vaisto.Parser.Loc{}}}
       }},
       Show: {:class, :Show, [0], [
         {:show, {:fn, [{:tvar, 0}], :string}}
