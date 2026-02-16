@@ -839,6 +839,17 @@ defmodule Vaisto.Parser do
     |> Enum.map(fn [param_name, type] -> {param_name, unwrap_type(type)} end)
   end
 
+  # Constrained instance: (instance Show (Maybe a) where [(Show a)] (show [x] ...))
+  # → {:instance_constrained, :Show, :Maybe, [:a], [{:Show, :a}], methods, loc}
+  defp parse_instance([class_name, {:call, type_name, type_params, _tloc}, :where, {:bracket, constraints} | methods], loc) when is_atom(class_name) do
+    parsed_constraints = Enum.map(constraints, fn
+      {:call, cname, [tvar], _} -> {cname, tvar}
+      {:call, cname, [tvar]} -> {cname, tvar}
+    end)
+    parsed_methods = Enum.map(methods, &parse_instance_method/1)
+    {:instance_constrained, class_name, type_name, type_params, parsed_constraints, parsed_methods, loc}
+  end
+
   # (instance Eq :int (eq [x y] (== x y)))
   # → {:instance, :Eq, :int, [{:eq, [:x, :y], body_ast}], loc}
   defp parse_instance([class_name, for_type | methods], loc) when is_atom(class_name) do

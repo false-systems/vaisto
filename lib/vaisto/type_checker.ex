@@ -1090,6 +1090,122 @@ defmodule Vaisto.TypeChecker do
     {:error, _} = err -> err
   end
 
+  # Constrained type class instance: (instance Show (Maybe a) where [(Show a)] ...)
+  defp check_impl({:instance_constrained, class_name, type_name, type_params, constraints, methods}, env) do
+    classes = Map.get(env, :__classes__, %{})
+    case Map.get(classes, class_name) do
+      class_def when is_tuple(class_def) and elem(class_def, 0) == :class ->
+        {tvar_ids, method_sigs, defaults} = extract_class_parts(class_def)
+
+        # Check for missing methods, accounting for defaults
+        required_names = Enum.map(method_sigs, fn {name, _type} -> name end) |> MapSet.new()
+        provided_names = Enum.map(methods, fn {name, _params, _body} -> name end) |> MapSet.new()
+        missing = MapSet.difference(required_names, provided_names)
+        {with_defaults, truly_missing} = Enum.split_with(missing, fn name ->
+          Map.has_key?(defaults, name)
+        end)
+
+        if length(truly_missing) > 0 do
+          {:error, Error.new("instance #{class_name} #{type_name} is missing methods: #{Enum.join(truly_missing, ", ")}")}
+        else
+          injected = Enum.map(with_defaults, fn name ->
+            {:default, param_names, body} = Map.fetch!(defaults, name)
+            {name, param_names, body}
+          end)
+          all_methods = methods ++ injected
+
+          # Build parameterized type: resolve Maybe → {:sum, :Maybe, [{:Just, [{:tvar, N}]}, ...]}
+          # then map tvars → named type params (:a, :b, ...)
+          resolved_type = resolve_instance_type(type_name, env)
+          tvar_to_param = build_tvar_to_param_mapping(resolved_type, type_params)
+          parameterized_type = apply_tvar_to_param(resolved_type, tvar_to_param)
+
+          # Substitute class tvars with parameterized type
+          subst = Map.new(tvar_ids, fn id -> {id, parameterized_type} end)
+          method_sig_map = Map.new(method_sigs)
+
+          # Register virtual instances for constraints
+          env_with_virtuals = register_virtual_instances(constraints, env)
+
+          typed_methods = Enum.map(all_methods, fn {method_name, params, body} ->
+            expected_type = Vaisto.TypeSystem.Core.apply_subst(subst, method_sig_map[method_name])
+            {:fn, param_types, _ret_type} = expected_type
+
+            local_env = Enum.zip(params, param_types)
+              |> Enum.reduce(env_with_virtuals, fn {param, type}, acc ->
+                acc |> Map.put(param, type) |> add_local_var(param)
+              end)
+
+            case check(body, local_env) do
+              {:ok, _body_type, typed_body} ->
+                {method_name, params, typed_body}
+              {:error, _} = err ->
+                throw(err)
+            end
+          end)
+
+          # Sort typed_methods to match class definition order
+          class_order = Enum.map(method_sigs, fn {name, _} -> name end)
+          sorted_methods = Enum.sort_by(typed_methods, fn {name, _, _} ->
+            Enum.find_index(class_order, &(&1 == name)) || 999
+          end)
+
+          {:ok, :instance, {:instance_constrained, class_name, type_name, type_params, constraints, sorted_methods, :instance}}
+        end
+
+      nil ->
+        {:error, Error.new("unknown type class: #{class_name}")}
+    end
+  catch
+    {:error, _} = err -> err
+  end
+
+  # Build mapping from tvar IDs in a resolved type to named type params
+  defp build_tvar_to_param_mapping({:sum, _name, variants}, type_params) do
+    tvar_ids = variants
+      |> Enum.flat_map(fn {_, types} -> collect_tvar_ids(types) end)
+      |> Enum.uniq()
+    Enum.zip(tvar_ids, type_params) |> Map.new()
+  end
+  defp build_tvar_to_param_mapping(_other, _type_params), do: %{}
+
+  # Replace tvar IDs with named atoms (type params) in a type
+  defp apply_tvar_to_param({:tvar, id}, mapping) do
+    Map.get(mapping, id, {:tvar, id})
+  end
+  defp apply_tvar_to_param({:sum, name, variants}, mapping) do
+    {:sum, name, Enum.map(variants, fn {ctor, types} ->
+      {ctor, Enum.map(types, &apply_tvar_to_param(&1, mapping))}
+    end)}
+  end
+  defp apply_tvar_to_param({:fn, params, ret}, mapping) do
+    {:fn, Enum.map(params, &apply_tvar_to_param(&1, mapping)), apply_tvar_to_param(ret, mapping)}
+  end
+  defp apply_tvar_to_param({:list, t}, mapping), do: {:list, apply_tvar_to_param(t, mapping)}
+  defp apply_tvar_to_param(other, _mapping), do: other
+
+  # Register virtual instances for constraints during constrained instance body checking
+  defp register_virtual_instances(constraints, env) do
+    Enum.with_index(constraints)
+    |> Enum.reduce(env, fn {{class_name, tvar}, idx}, acc ->
+      classes = Map.get(acc, :__classes__, %{})
+      class_def = Map.get(classes, class_name)
+      case class_def do
+        nil -> acc
+        _ ->
+          {class_tvar_ids, method_sigs, _} = extract_class_parts(class_def)
+          # Build method types substituting class tvar → constraint tvar (the named param)
+          subst = Map.new(class_tvar_ids, fn id -> {id, tvar} end)
+          concrete = Map.new(method_sigs, fn {name, type} ->
+            {name, Vaisto.TypeSystem.Core.apply_subst(subst, type)}
+          end)
+          virtual = {:virtual, idx, concrete}
+          instances = Map.get(acc, :__instances__, %{})
+          Map.put(acc, :__instances__, Map.put(instances, {class_name, tvar}, virtual))
+      end
+    end)
+  end
+
   # Extract tvar_ids, method_sigs, defaults from class def (4-tuple or 5-tuple)
   defp extract_class_parts({:class, _name, tvar_ids, method_sigs, defaults}),
     do: {tvar_ids, method_sigs, defaults}
@@ -1377,25 +1493,148 @@ defmodule Vaisto.TypeChecker do
         match?({:tvar, _}, concrete_type) ->
           {:halt, {:ok, ret_type, {:call, method_name, typed_args, ret_type}}}
 
-        # Check instance exists (use normalized key for ADT/record types)
-        Map.has_key?(instances, {class_name, instance_key}) ->
-          {:cont, {:ok, {:class_call, class_name, method_name, instance_key, typed_args, ret_type}}}
-
         true ->
-          {:halt, {:error, Error.new("no instance of `#{class_name}` for type `#{Vaisto.TypeSystem.Core.format_type(concrete_type)}`")}}
+          case Map.get(instances, {class_name, instance_key}) do
+            # Virtual instance (inside constrained instance body) → constraint_call
+            {:virtual, idx, _methods} ->
+              {:cont, {:ok, {:constraint_call, idx, method_name, typed_args, ret_type}}}
+
+            # Constrained instance at call site → resolve sub-constraints
+            {:constrained, inst_type_params, inst_constraints, _methods} ->
+              resolved = resolve_constrained_instance(
+                class_name, instance_key, inst_type_params, inst_constraints,
+                concrete_type, typed_args, env
+              )
+              case resolved do
+                {:ok, resolved_constraints} ->
+                  {:cont, {:ok, {:class_call, class_name, method_name, instance_key, typed_args, ret_type, resolved_constraints}}}
+                {:error, _} = err ->
+                  {:halt, err}
+              end
+
+            # Regular (unconstrained) instance
+            methods when is_map(methods) ->
+              {:cont, {:ok, {:class_call, class_name, method_name, instance_key, typed_args, ret_type}}}
+
+            nil ->
+              {:halt, {:error, Error.new("no instance of `#{class_name}` for type `#{Vaisto.TypeSystem.Core.format_type(concrete_type)}`")}}
+          end
       end
     end)
     |> case do
       {:ok, nil} ->
         {:ok, ret_type, {:call, method_name, typed_args, ret_type}}
+      {:ok, {:class_call, _, _, _, _, _, _} = class_call} ->
+        {:ok, ret_type, class_call}
       {:ok, {:class_call, class_name, method_name, concrete_type, typed_args, ret_type}} ->
         {:ok, ret_type, {:class_call, class_name, method_name, concrete_type, typed_args, ret_type}}
+      {:ok, {:constraint_call, idx, method_name, typed_args, ret_type}} ->
+        {:ok, ret_type, {:constraint_call, idx, method_name, typed_args, ret_type}}
       {:ok, ret_type, ast} ->
         {:ok, ret_type, ast}
       {:error, _} = err ->
         err
     end
   end
+
+  # Resolve sub-constraints for a constrained instance at a call site
+  # E.g., (show (Just 42)) → constrained Show Maybe needs Show :int
+  defp resolve_constrained_instance(class_name, instance_key, inst_type_params, inst_constraints, concrete_type, typed_args, env) do
+    instances = Map.get(env, :__instances__, %{})
+
+    # Get the parameterized type to extract bindings
+    resolved_param = resolve_instance_type(instance_key, env)
+    bindings = extract_type_param_bindings(resolved_param, concrete_type, inst_type_params, typed_args)
+
+    # Resolve each constraint with the bindings
+    resolved = Enum.reduce_while(inst_constraints, {:ok, []}, fn {c_class, c_tvar}, {:ok, acc} ->
+      bound_type = Map.get(bindings, c_tvar)
+      cond do
+        # Binding resolved to a concrete type — check instance exists
+        bound_type != nil ->
+          bound_key = normalize_instance_type(bound_type)
+          case Map.get(instances, {c_class, bound_key}) do
+            nil ->
+              {:halt, {:error, Error.new(
+                "no instance of `#{c_class}` for type `#{Vaisto.TypeSystem.Core.format_type(bound_type)}`\n" <>
+                "  required by constrained instance `#{class_name} #{instance_key}`"
+              )}}
+            _ ->
+              {:cont, {:ok, acc ++ [{c_class, bound_key}]}}
+          end
+
+        # Binding unresolvable (e.g., nullary constructor of parametric type)
+        # Use :any as placeholder — the constraint dict won't be invoked at runtime
+        true ->
+          {:cont, {:ok, acc ++ [{c_class, :any}]}}
+      end
+    end)
+
+    resolved
+  end
+
+  # Extract type param bindings by looking at the typed arguments of the call.
+  # For `(show (Just 42))`, the typed_arg is `{:call, :Just, [{:lit, :int, 42}], sum_type}`.
+  # We extract the inner concrete types from constructor args.
+  defp extract_type_param_bindings({:sum, _, p_variants}, _concrete_type, type_params, typed_args) do
+    tvar_ids = p_variants
+      |> Enum.flat_map(fn {_, types} -> collect_tvar_ids(types) end)
+      |> Enum.uniq()
+    tvar_to_param = Enum.zip(tvar_ids, type_params) |> Map.new()
+
+    # Extract inner types from the first typed arg that's a constructor call
+    inner_types = extract_inner_types_from_args(typed_args)
+
+    # For each tvar in parameterized type, find the matching concrete type
+    Enum.zip(p_variants, List.duplicate(nil, length(p_variants)))
+    |> Enum.flat_map(fn {{_ctor, field_types}, _} ->
+      Enum.with_index(field_types)
+    end)
+    |> Enum.reduce(%{}, fn {field_type, idx}, acc ->
+      case field_type do
+        {:tvar, id} ->
+          case {Map.get(tvar_to_param, id), Map.get(inner_types, idx)} do
+            {nil, _} -> acc
+            {_, nil} -> acc
+            {param, concrete} -> Map.put(acc, param, concrete)
+          end
+        _ -> acc
+      end
+    end)
+  end
+  defp extract_type_param_bindings(_param, _concrete, _type_params, _typed_args), do: %{}
+
+  # Extract inner types from typed constructor args
+  # (Just 42) → %{0 => :int}
+  # (Nothing) → %{}
+  defp extract_inner_types_from_args(typed_args) do
+    case typed_args do
+      [{:call, _ctor, ctor_args, _type} | _] ->
+        ctor_args
+        |> Enum.with_index()
+        |> Map.new(fn {arg, idx} -> {idx, typed_ast_type(arg)} end)
+      [{:lit, :atom, _} | _] ->
+        # Nullary constructor like (Nothing)
+        %{}
+      _ -> %{}
+    end
+  end
+
+  # Extract the type from a typed AST node
+  defp typed_ast_type({:lit, type, _}), do: type
+  defp typed_ast_type({:var, _, type}), do: type
+  defp typed_ast_type({:call, _, _, type}), do: type
+  defp typed_ast_type({:class_call, _, _, _, _, type}), do: type
+  defp typed_ast_type({:class_call, _, _, _, _, type, _}), do: type
+  defp typed_ast_type({:if, _, _, _, type}), do: type
+  defp typed_ast_type({:match, _, _, type}), do: type
+  defp typed_ast_type({:let, _, _, type}), do: type
+  defp typed_ast_type({:do, _, type}), do: type
+  defp typed_ast_type({:list, _, type}), do: type
+  defp typed_ast_type({:fn, _, _, type}), do: type
+  defp typed_ast_type({:apply, _, _, type}), do: type
+  defp typed_ast_type({:fn_ref, _, _, type}), do: type
+  defp typed_ast_type(_), do: :any
 
   # Resolve the constraint type from argument types
   # If the constraint is {:tvar, N}, look at actual arg types
@@ -2294,6 +2533,12 @@ defmodule Vaisto.TypeChecker do
         {:instance, class_name, for_type, _methods} ->
           collect_instance_signature(class_name, for_type, acc_env)
 
+        {:instance_constrained, class_name, type_name, type_params, constraints, _methods, %Vaisto.Parser.Loc{}} ->
+          collect_constrained_instance_signature(class_name, type_name, type_params, constraints, acc_env)
+
+        {:instance_constrained, class_name, type_name, type_params, constraints, _methods} ->
+          collect_constrained_instance_signature(class_name, type_name, type_params, constraints, acc_env)
+
         {:deftype_deriving, name, type_def, classes, %Vaisto.Parser.Loc{}} ->
           expand_deriving_signatures(name, type_def, classes, acc_env)
 
@@ -2475,6 +2720,29 @@ defmodule Vaisto.TypeChecker do
 
       nil ->
         # Class not found — will error during checking pass
+        env
+    end
+  end
+
+  defp collect_constrained_instance_signature(class_name, type_name, type_params, constraints, env) do
+    classes = Map.get(env, :__classes__, %{})
+    class_def = Map.get(classes, class_name)
+    case class_def do
+      tuple when is_tuple(tuple) and elem(tuple, 0) == :class ->
+        {tvar_ids, method_sigs, _defaults} = extract_class_parts(class_def)
+        # Resolve the ADT type and compute concrete methods
+        resolved_type = resolve_instance_type(type_name, env)
+        subst = Map.new(tvar_ids, fn id -> {id, resolved_type} end)
+        concrete_methods = Map.new(method_sigs, fn {method_name, method_type} ->
+          {method_name, Vaisto.TypeSystem.Core.apply_subst(subst, method_type)}
+        end)
+
+        # Store with constraint metadata for call-site resolution
+        entry = {:constrained, type_params, constraints, concrete_methods}
+        instances = Map.get(env, :__instances__, %{})
+        Map.put(env, :__instances__, Map.put(instances, {class_name, type_name}, entry))
+
+      nil ->
         env
     end
   end

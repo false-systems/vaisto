@@ -203,6 +203,7 @@ defmodule Vaisto.CoreEmitter do
       {:import, _, _} -> true      # Skip import (compile-time only)
       {:defclass, _, _, _, _} -> true  # Skip defclass (compile-time only)
       {:instance, _, _, _, _} -> true  # Instance dicts generated separately
+      {:instance_constrained, _, _, _, _, _, _} -> true  # Constrained instance dicts generated separately
       _ -> false
     end)
 
@@ -631,6 +632,25 @@ defmodule Vaisto.CoreEmitter do
   defp to_core_expr({:class_call, class_name, method_name, concrete_type, args, _type}, user_fns, local_vars) do
     arg_cores = Enum.map(args, &to_core_expr(&1, user_fns, local_vars))
     emit_class_call(class_name, method_name, concrete_type, arg_cores)
+  end
+
+  # Constrained class call: call site for a constrained instance (7-element tuple)
+  defp to_core_expr({:class_call, class_name, method_name, concrete_type, args, _type, resolved_constraints}, user_fns, local_vars) do
+    arg_cores = Enum.map(args, &to_core_expr(&1, user_fns, local_vars))
+    emit_constrained_class_call(class_name, method_name, concrete_type, arg_cores, resolved_constraints)
+  end
+
+  # Constraint call: inside a constrained instance body, dispatches via constraint dict param
+  defp to_core_expr({:constraint_call, idx, method_name, args, _type}, user_fns, local_vars) do
+    dict_var = :cerl.c_var(:"__constraint_#{idx}")
+    method_index = get_method_index_for_constraint_call(method_name, idx)
+    method_fn = :cerl.c_call(
+      :cerl.c_atom(:erlang),
+      :cerl.c_atom(:element),
+      [:cerl.c_int(method_index), dict_var]
+    )
+    arg_cores = Enum.map(args, &to_core_expr(&1, user_fns, local_vars))
+    :cerl.c_apply(method_fn, arg_cores)
   end
 
   # Comparison operators
@@ -1351,6 +1371,76 @@ defmodule Vaisto.CoreEmitter do
     :cerl.c_apply(method_fn, arg_cores)
   end
 
+  # Constrained class call at call site: construct constraint dicts and pass to dict function
+  defp emit_constrained_class_call(class_name, method_name, concrete_type, arg_cores, resolved_constraints) do
+    constraint_dicts = Enum.map(resolved_constraints, fn {c_class, c_type} ->
+      build_constraint_dict(c_class, c_type)
+    end)
+    dict_fn_name = dict_function_name(class_name, concrete_type)
+    dict_call = :cerl.c_apply(:cerl.c_fname(dict_fn_name, length(constraint_dicts)), constraint_dicts)
+    method_index = get_method_index(class_name, method_name)
+    method_fn = :cerl.c_call(
+      :cerl.c_atom(:erlang),
+      :cerl.c_atom(:element),
+      [:cerl.c_int(method_index), dict_call]
+    )
+    :cerl.c_apply(method_fn, arg_cores)
+  end
+
+  # Build a constraint dictionary for a given class + concrete type
+  defp build_constraint_dict(:Eq, t) when t in [:int, :float, :string, :bool, :atom] do
+    build_builtin_eq_dict()
+  end
+  defp build_constraint_dict(:Show, :int), do: build_builtin_show_int_dict()
+  defp build_constraint_dict(:Show, :float), do: build_builtin_show_float_dict()
+  defp build_constraint_dict(:Show, :string), do: build_builtin_show_string_dict()
+  defp build_constraint_dict(:Show, :bool), do: build_builtin_show_bool_dict()
+  # Unresolvable type param (e.g., nullary constructor) — build dummy dict
+  defp build_constraint_dict(:Show, :any), do: build_builtin_show_string_dict()
+  defp build_constraint_dict(:Eq, :any), do: build_builtin_eq_dict()
+  defp build_constraint_dict(class_name, concrete_type) do
+    # User-defined unconstrained instance: call __dict_Class_Type/0
+    :cerl.c_apply(:cerl.c_fname(dict_function_name(class_name, concrete_type), 0), [])
+  end
+
+  defp build_builtin_eq_dict do
+    x = :cerl.c_var(:__eq_x)
+    y = :cerl.c_var(:__eq_y)
+    eq_fn = :cerl.c_fun([x, y],
+      :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:"=:="), [x, y]))
+    neq_fn = :cerl.c_fun([x, y],
+      :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:not),
+        [:cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:"=:="), [x, y])]))
+    :cerl.c_tuple([eq_fn, neq_fn])
+  end
+
+  defp build_builtin_show_int_dict do
+    x = :cerl.c_var(:__show_x)
+    show_fn = :cerl.c_fun([x],
+      :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:integer_to_binary), [x]))
+    :cerl.c_tuple([show_fn])
+  end
+
+  defp build_builtin_show_float_dict do
+    x = :cerl.c_var(:__show_x)
+    show_fn = :cerl.c_fun([x],
+      :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:float_to_binary), [x]))
+    :cerl.c_tuple([show_fn])
+  end
+
+  defp build_builtin_show_string_dict do
+    x = :cerl.c_var(:__show_x)
+    show_fn = :cerl.c_fun([x], x)
+    :cerl.c_tuple([show_fn])
+  end
+
+  defp build_builtin_show_bool_dict do
+    x = :cerl.c_var(:__show_x)
+    show_fn = :cerl.c_fun([x],
+      :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:atom_to_binary), [x]))
+    :cerl.c_tuple([show_fn])
+  end
+
   defp dict_function_name(class_name, concrete_type) do
     :"__dict_#{class_name}_#{concrete_type}"
   end
@@ -1371,10 +1461,21 @@ defmodule Vaisto.CoreEmitter do
     end
   end
 
+  # For constraint_call, we need to find the method index from the class
+  # The constraint's class is tracked via process dict during generation
+  defp get_method_index_for_constraint_call(method_name, idx) do
+    # During constrained instance dict generation, we store the constraint-to-class mapping
+    constraint_classes = Process.get(:__vaisto_constraint_classes__, %{})
+    case Map.get(constraint_classes, idx) do
+      nil -> 1
+      class_name -> get_method_index(class_name, method_name)
+    end
+  end
+
   # Generate dictionary function definitions for user-defined instances
   # Returns list of {fname, fun} pairs to include in the module
   defp generate_instance_dicts(forms, user_fns) do
-    forms
+    unconstrained = forms
     |> Enum.filter(fn
       {:instance, _, _, _, _} -> true
       _ -> false
@@ -1395,5 +1496,43 @@ defmodule Vaisto.CoreEmitter do
       fun = :cerl.c_fun([], dict_tuple)
       {fname, fun}
     end)
+
+    constrained = forms
+    |> Enum.filter(fn
+      {:instance_constrained, _, _, _, _, _, _} -> true
+      _ -> false
+    end)
+    |> Enum.map(fn {:instance_constrained, class_name, for_type, _type_params, constraints, methods, _type} ->
+      dict_fn_name = dict_function_name(class_name, for_type)
+
+      # Store constraint-to-class mapping so constraint_call can find method indices
+      constraint_classes = Enum.with_index(constraints)
+        |> Map.new(fn {{c_class, _c_tvar}, idx} -> {idx, c_class} end)
+      Process.put(:__vaisto_constraint_classes__, constraint_classes)
+
+      # Arity = number of constraints (one dict param per constraint)
+      constraint_params = Enum.with_index(constraints) |> Enum.map(fn {_, idx} ->
+        :cerl.c_var(:"__constraint_#{idx}")
+      end)
+
+      fname = :cerl.c_fname(dict_fn_name, length(constraints))
+
+      method_closures = Enum.map(methods, fn {_method_name, params, typed_body} ->
+        param_vars = Enum.map(params, &:cerl.c_var/1)
+        local_vars = MapSet.new(params)
+        body_core = to_core_expr(typed_body, user_fns, local_vars)
+        :cerl.c_fun(param_vars, body_core)
+      end)
+
+      dict_tuple = :cerl.c_tuple(method_closures)
+      fun = :cerl.c_fun(constraint_params, dict_tuple)
+
+      # Clean up process dict
+      Process.delete(:__vaisto_constraint_classes__)
+
+      {fname, fun}
+    end)
+
+    unconstrained ++ constrained
   end
 end

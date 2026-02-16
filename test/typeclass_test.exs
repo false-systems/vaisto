@@ -690,4 +690,200 @@ defmodule Vaisto.TypeClassTest do
       assert true == Runner.call(mod, :main)
     end
   end
+
+  # =========================================================================
+  # Parsing — Constrained Instances
+  # =========================================================================
+
+  describe "parsing constrained instances" do
+    test "parses instance with where clause" do
+      code = """
+      (instance Show (Maybe a) where [(Show a)]
+        (show [x] "hi"))
+      """
+      ast = Parser.parse(code)
+      assert {:instance_constrained, :Show, :Maybe, [:a], [{:Show, :a}], _, _} = ast
+    end
+
+    test "parses multiple constraints" do
+      code = """
+      (instance MyClass (Pair a b) where [(Eq a) (Show b)]
+        (method1 [x] x))
+      """
+      ast = Parser.parse(code)
+      assert {:instance_constrained, :MyClass, :Pair, [:a, :b], [{:Eq, :a}, {:Show, :b}], _, _} = ast
+    end
+  end
+
+  # =========================================================================
+  # Type Checking — Constrained Instances
+  # =========================================================================
+
+  describe "type checking constrained instances" do
+    test "constrained Show Maybe type checks" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (instance Show (Maybe a) where [(Show a)]
+        (show [x] (match x
+          [(Just v) (str "Just(" (show v) ")")]
+          [(Nothing) "Nothing"])))
+      (show (Just 42))
+      """
+      ast = Parser.parse(code)
+      assert {:ok, :module, _} = TypeChecker.check(ast)
+    end
+
+    test "constrained instance resolves to 7-element class_call" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (instance Show (Maybe a) where [(Show a)]
+        (show [x] "hi"))
+      (show (Just 1))
+      """
+      ast = Parser.parse(code)
+      {:ok, :module, {:module, forms}} = TypeChecker.check(ast)
+      last = List.last(forms)
+      assert {:class_call, :Show, :show, :Maybe, _, :string, [{:Show, :int}]} = last
+    end
+
+    test "constraint_call emitted inside constrained instance body" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (instance Show (Maybe a) where [(Show a)]
+        (show [x] (match x
+          [(Just v) (show v)]
+          [(Nothing) "Nothing"])))
+      (show (Just 1))
+      """
+      ast = Parser.parse(code)
+      {:ok, :module, {:module, forms}} = TypeChecker.check(ast)
+      # The instance_constrained form should contain a constraint_call in its body
+      instance_form = Enum.find(forms, fn
+        {:instance_constrained, _, _, _, _, _, _} -> true
+        _ -> false
+      end)
+      assert {:instance_constrained, :Show, :Maybe, [:a], _, methods, :instance} = instance_form
+      [{:show, [:x], body}] = methods
+      # The body has a match, and the Just branch calls constraint_call
+      {:match, _, clauses, _} = body
+      [{_, just_body, _} | _] = clauses
+      assert {:constraint_call, 0, :show, _, :string} = just_body
+    end
+
+    test "constraint not satisfied produces error" do
+      code = """
+      (deftype Wrapper (Wrap v))
+      (deftype Maybe (Just v) (Nothing))
+      (instance Show (Maybe a) where [(Show a)]
+        (show [x] "hi"))
+      (show (Just (Wrap 1)))
+      """
+      ast = Parser.parse(code)
+      result = TypeChecker.check(ast)
+      assert {:error, _} = result
+    end
+  end
+
+  # =========================================================================
+  # Code Generation + Runtime — Constrained Instances
+  # =========================================================================
+
+  describe "codegen: constrained Show Maybe" do
+    test "(show (Just 42)) => \"Just(42)\"" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (instance Show (Maybe a) where [(Show a)]
+        (show [x] (match x
+          [(Just v) (str "Just(" (show v) ")")]
+          [(Nothing) "Nothing"])))
+      (show (Just 42))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedShowJustInt, backend: :core)
+      assert "Just(42)" == Runner.call(mod, :main)
+    end
+
+    test "(show (Nothing)) => \"Nothing\"" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (instance Show (Maybe a) where [(Show a)]
+        (show [x] (match x
+          [(Just v) (str "Just(" (show v) ")")]
+          [(Nothing) "Nothing"])))
+      (show (Nothing))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedShowNothing, backend: :core)
+      assert "Nothing" == Runner.call(mod, :main)
+    end
+
+    test "(show (Just \"hello\")) => \"Just(hello)\"" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (instance Show (Maybe a) where [(Show a)]
+        (show [x] (match x
+          [(Just v) (str "Just(" (show v) ")")]
+          [(Nothing) "Nothing"])))
+      (show (Just "hello"))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedShowJustStr, backend: :core)
+      assert "Just(hello)" == Runner.call(mod, :main)
+    end
+
+    test "(show (Just true)) => \"Just(true)\"" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (instance Show (Maybe a) where [(Show a)]
+        (show [x] (match x
+          [(Just v) (str "Just(" (show v) ")")]
+          [(Nothing) "Nothing"])))
+      (show (Just true))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedShowJustBool, backend: :core)
+      assert "Just(true)" == Runner.call(mod, :main)
+    end
+  end
+
+  describe "codegen: constrained Eq Maybe" do
+    test "constrained Eq with structural equality" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (instance Eq (Maybe a) where [(Eq a)]
+        (eq [x y] (== x y)))
+      (eq (Just 1) (Just 1))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedEqTrue, backend: :core)
+      assert true == Runner.call(mod, :main)
+    end
+
+    test "constrained Eq returns false for different values" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (instance Eq (Maybe a) where [(Eq a)]
+        (eq [x y] (== x y)))
+      (eq (Just 1) (Just 2))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedEqFalse, backend: :core)
+      assert false == Runner.call(mod, :main)
+    end
+  end
+
+  describe "codegen: constrained instance with user-defined inner type" do
+    test "Show Maybe with Show Color inner type" do
+      code = """
+      (deftype Color (Red) (Green) (Blue))
+      (instance Show Color
+        (show [x] (match x
+          [(Red) "red"]
+          [(Green) "green"]
+          [(Blue) "blue"])))
+      (deftype Maybe (Just v) (Nothing))
+      (instance Show (Maybe a) where [(Show a)]
+        (show [x] (match x
+          [(Just v) (str "Just(" (show v) ")")]
+          [(Nothing) "Nothing"])))
+      (show (Just (Green)))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedShowJustColor, backend: :core)
+      assert "Just(green)" == Runner.call(mod, :main)
+    end
+  end
 end
