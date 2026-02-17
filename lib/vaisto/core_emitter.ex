@@ -1373,13 +1373,7 @@ defmodule Vaisto.CoreEmitter do
 
   # Constrained class call at call site: construct constraint dicts and pass to dict function
   defp emit_constrained_class_call(class_name, method_name, concrete_type, arg_cores, resolved_constraints) do
-    constraint_dicts = Enum.map(resolved_constraints, fn
-      {:constraint_ref, idx} ->
-        # Forward the constraint dict parameter (inside constrained instance body)
-        :cerl.c_var(:"__constraint_#{idx}")
-      {c_class, c_type} ->
-        build_constraint_dict(c_class, c_type)
-    end)
+    constraint_dicts = Enum.map(resolved_constraints, &build_resolved_constraint/1)
     dict_fn_name = dict_function_name(class_name, concrete_type)
     dict_call = :cerl.c_apply(:cerl.c_fname(dict_fn_name, length(constraint_dicts)), constraint_dicts)
     method_index = get_method_index(class_name, method_name)
@@ -1392,6 +1386,20 @@ defmodule Vaisto.CoreEmitter do
   end
 
   # Build a constraint dictionary for a given class + concrete type
+  # Recursively build constraint dict for resolved constraint entries
+  defp build_resolved_constraint({:constraint_ref, idx}) do
+    :cerl.c_var(:"__constraint_#{idx}")
+  end
+
+  defp build_resolved_constraint({:constrained_ref, c_class, c_type, sub_constraints}) do
+    sub_dicts = Enum.map(sub_constraints, &build_resolved_constraint/1)
+    :cerl.c_apply(:cerl.c_fname(dict_function_name(c_class, c_type), length(sub_dicts)), sub_dicts)
+  end
+
+  defp build_resolved_constraint({c_class, c_type}) do
+    build_constraint_dict(c_class, c_type)
+  end
+
   defp build_constraint_dict(:Eq, t) when t in [:int, :float, :string, :bool, :atom] do
     build_builtin_eq_dict()
   end

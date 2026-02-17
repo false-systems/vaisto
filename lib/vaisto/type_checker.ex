@@ -1567,6 +1567,17 @@ defmodule Vaisto.TypeChecker do
                 "no instance of `#{c_class}` for type `#{Vaisto.TypeSystem.Core.format_type(bound_type)}`\n" <>
                 "  required by constrained instance `#{class_name} #{instance_key}`"
               )}}
+
+            # Sub-instance is itself constrained — recurse to resolve its constraints
+            {:constrained, sub_tp, sub_cs, _sub_methods} ->
+              inner_typed_args = extract_inner_typed_args(typed_args)
+              case resolve_chained_constraint(c_class, bound_key, sub_tp, sub_cs, bound_type, inner_typed_args, env, 1) do
+                {:ok, sub_resolved} ->
+                  {:cont, {:ok, acc ++ [{:constrained_ref, c_class, bound_key, sub_resolved}]}}
+                {:error, _} = err ->
+                  {:halt, err}
+              end
+
             _ ->
               {:cont, {:ok, acc ++ [{c_class, bound_key}]}}
           end
@@ -1580,6 +1591,55 @@ defmodule Vaisto.TypeChecker do
 
     resolved
   end
+
+  # Recursively resolve sub-constraints for chained constrained instances.
+  # E.g., Show (Maybe a) needs Show a; if a=Maybe Int, Show Maybe is itself
+  # constrained → recurse to resolve Show Int.
+  # Uses inner typed_args (peeled from the parent's typed_args) to extract bindings.
+  defp resolve_chained_constraint(_c, _k, _tp, _cs, _concrete, _typed_args, _env, depth) when depth > 10 do
+    {:error, Error.new("constraint resolution depth exceeded (possible infinite chain)")}
+  end
+
+  defp resolve_chained_constraint(c_class, bound_key, inst_type_params, inst_constraints,
+                                   concrete_type, typed_args, env, depth) do
+    instances = Map.get(env, :__instances__, %{})
+    resolved_param = resolve_instance_type(bound_key, env)
+    bindings = extract_type_param_bindings(resolved_param, concrete_type, inst_type_params, typed_args)
+
+    Enum.reduce_while(inst_constraints, {:ok, []}, fn {sub_class, sub_tvar}, {:ok, acc} ->
+      sub_bound = Map.get(bindings, sub_tvar)
+      cond do
+        sub_bound == nil ->
+          {:cont, {:ok, acc ++ [{sub_class, :any}]}}
+        true ->
+          sub_key = normalize_instance_type(sub_bound)
+          case Map.get(instances, {sub_class, sub_key}) do
+            {:virtual, vidx, _} ->
+              {:cont, {:ok, acc ++ [{:constraint_ref, vidx}]}}
+            {:constrained, sub_tp, sub_cs, _} ->
+              inner = extract_inner_typed_args(typed_args)
+              case resolve_chained_constraint(sub_class, sub_key, sub_tp, sub_cs, sub_bound, inner, env, depth + 1) do
+                {:ok, sub_constraints} ->
+                  {:cont, {:ok, acc ++ [{:constrained_ref, sub_class, sub_key, sub_constraints}]}}
+                {:error, _} = err ->
+                  {:halt, err}
+              end
+            nil ->
+              {:halt, {:error, Error.new(
+                "no instance of `#{sub_class}` for type `#{Vaisto.TypeSystem.Core.format_type(sub_bound)}`\n" <>
+                "  required by constrained instance `#{c_class} #{bound_key}`"
+              )}}
+            _ ->
+              {:cont, {:ok, acc ++ [{sub_class, sub_key}]}}
+          end
+      end
+    end)
+  end
+
+  # Extract inner typed args by peeling one constructor layer.
+  # E.g., [{:call, :Just, [inner_arg], _type}] → [inner_arg]
+  defp extract_inner_typed_args([{:call, _ctor, inner_args, _type} | _]), do: inner_args
+  defp extract_inner_typed_args(_), do: []
 
   # Extract type param bindings by looking at the typed arguments of the call.
   # For `(show (Just 42))`, the typed_arg is `{:call, :Just, [{:lit, :int, 42}], sum_type}`.

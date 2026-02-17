@@ -968,6 +968,24 @@ defmodule Vaisto.TypeClassTest do
       assert {:error, _} = result
     end
 
+    test "missing instance for chained constraint" do
+      code = """
+      (deftype Wrapper (Wrap v))
+      (deftype Maybe (Just v) (Nothing))
+      (instance Show (Maybe a) where [(Show a)]
+        (show [x] (match x
+          [(Just v) (str "Just(" (show v) ")")]
+          [(Nothing) "Nothing"])))
+      (show (Just (Wrap 1)))
+      """
+      ast = Parser.parse(code)
+      result = TypeChecker.check(ast)
+      {:error, errs} = result
+      err = if is_list(errs), do: hd(errs), else: errs
+      msg = error_text(err)
+      assert msg =~ "no instance of"
+    end
+
     test "unsatisfied constraint includes context message" do
       code = """
       (deftype Wrapper (Wrap v))
@@ -984,4 +1002,105 @@ defmodule Vaisto.TypeClassTest do
       assert msg =~ "required by constrained instance"
     end
   end
+
+  # =========================================================================
+  # Chained Constraints (v6)
+  # =========================================================================
+
+  describe "codegen: chained constraints — Show Maybe(Maybe)" do
+    test "(show (Just (Just 42))) => nested show" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (instance Show (Maybe a) where [(Show a)]
+        (show [x] (match x
+          [(Just v) (str "Just(" (show v) ")")]
+          [(Nothing) "Nothing"])))
+      (show (Just (Just 42)))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :ChainedShowJustJust, backend: :core)
+      assert "Just(Just(42))" == Runner.call(mod, :main)
+    end
+
+    test "(show (Just (Just (Just 42)))) => triple chain" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (instance Show (Maybe a) where [(Show a)]
+        (show [x] (match x
+          [(Just v) (str "Just(" (show v) ")")]
+          [(Nothing) "Nothing"])))
+      (show (Just (Just (Just 42))))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :ChainedShowTriple, backend: :core)
+      assert "Just(Just(Just(42)))" == Runner.call(mod, :main)
+    end
+
+    test "(show (Just (Nothing))) => chained with nullary" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (instance Show (Maybe a) where [(Show a)]
+        (show [x] (match x
+          [(Just v) (str "Just(" (show v) ")")]
+          [(Nothing) "Nothing"])))
+      (show (Just (Nothing)))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :ChainedShowJustNothing, backend: :core)
+      assert "Just(Nothing)" == Runner.call(mod, :main)
+    end
+  end
+
+  describe "codegen: chained constraints — Eq Maybe(Maybe)" do
+    test "(eq (Just (Just 1)) (Just (Just 1))) => true" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (instance Eq (Maybe a) where [(Eq a)]
+        (eq [x y] (== x y)))
+      (eq (Just (Just 1)) (Just (Just 1)))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :ChainedEqTrue, backend: :core)
+      assert true == Runner.call(mod, :main)
+    end
+
+    test "(eq (Just (Just 1)) (Just (Just 2))) => false" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (instance Eq (Maybe a) where [(Eq a)]
+        (eq [x y] (== x y)))
+      (eq (Just (Just 1)) (Just (Just 2)))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :ChainedEqFalse, backend: :core)
+      assert false == Runner.call(mod, :main)
+    end
+  end
+
+  describe "type checking: chained constraints produce constrained_ref" do
+    test "class_call contains {:constrained_ref, ...} for nested constrained instance" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (instance Show (Maybe a) where [(Show a)]
+        (show [x] (match x
+          [(Just v) (str "Just(" (show v) ")")]
+          [(Nothing) "Nothing"])))
+      (show (Just (Just 42)))
+      """
+      ast = Parser.parse(code)
+      {:ok, _type, typed_ast} = TypeChecker.check(ast)
+      # The typed AST should contain a 7-element class_call with constrained_ref in resolved constraints
+      class_call = find_class_call(typed_ast)
+      assert {:class_call, :Show, :show, :Maybe, _args, _ret, resolved} = class_call
+      assert [{:constrained_ref, :Show, :Maybe, sub}] = resolved
+      # The sub-constraint should resolve to a flat Show :int
+      assert [{:Show, :int}] = sub
+    end
+  end
+
+  defp find_class_call(ast) when is_list(ast) do
+    Enum.find_value(ast, &find_class_call/1)
+  end
+  defp find_class_call({:class_call, _, _, _, _, _, _} = call), do: call
+  defp find_class_call(tuple) when is_tuple(tuple) do
+    tuple
+    |> Tuple.to_list()
+    |> Enum.find_value(&find_class_call/1)
+  end
+  defp find_class_call(_), do: nil
 end
