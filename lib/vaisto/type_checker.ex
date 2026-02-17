@@ -233,7 +233,7 @@ defmodule Vaisto.TypeChecker do
          {:ok, tail_type, typed_tail} <- check(tail, env) do
       # The result is a list containing head_type elements
       elem_type = case tail_type do
-        {:list, t} -> unify_two_simple(head_type, t)
+        {:list, t} -> join_types(head_type, t)
         _ -> head_type  # If tail type unknown, use head type
       end
       {:ok, {:list, elem_type}, {:cons, typed_head, typed_tail, {:list, elem_type}}}
@@ -380,12 +380,13 @@ defmodule Vaisto.TypeChecker do
 
         :any ->
           # Treat :any as an open row type - enables row polymorphism for untyped params
-          # Use a large base ID (2_000_000) to avoid collisions with regular tvars
-          field_tvar_id = fresh_field_tvar_id(2_000_000, field)
+          # Use base_id 200 — maps to 100_200_000_000+ range in fresh_field_tvar_id
+          any_row_base_id = 200
+          field_tvar_id = fresh_field_tvar_id(any_row_base_id, field)
           field_type = {:tvar, field_tvar_id}
 
           # Row constraint: any must be a row with at least this field
-          row_constraint = {:row, [{field, field_type}], {:rvar, 2_000_000}}
+          row_constraint = {:row, [{field, field_type}], {:rvar, any_row_base_id}}
 
           {:ok, field_type, {:field_access, typed_record, field, field_type, row_constraint}}
 
@@ -764,6 +765,19 @@ defmodule Vaisto.TypeChecker do
         {:constrained_method, vars, constraints, fn_type, method_name} ->
           check_class_method_call(method_name, vars, constraints, fn_type, args, env)
 
+        {:forall, vars, fn_type} ->
+          # Polymorphic function — instantiate with fresh tvars and unify
+          base_id = :erlang.unique_integer([:positive, :monotonic]) * 1000
+          fresh_subst = vars
+            |> Enum.with_index()
+            |> Map.new(fn {var, idx} -> {var, {:tvar, base_id + idx}} end)
+          inst_fn_type = Vaisto.TypeSystem.Core.apply_subst(fresh_subst, fn_type)
+
+          with {:ok, arg_types, typed_args} <- check_args(args, env),
+               {:ok, ret_type} <- unify_call_poly(inst_fn_type, arg_types, args) do
+            {:ok, ret_type, {:call, func, typed_args, ret_type}}
+          end
+
         _ ->
           with {:ok, arg_types, typed_args} <- check_args(args, env),
                {:ok, ret_type} <- unify_call(func_type, arg_types, args) do
@@ -976,7 +990,7 @@ defmodule Vaisto.TypeChecker do
       {:ok, typed_clauses} ->
         # Unify return types from all clauses
         ret_types = Enum.map(typed_clauses, fn {_, _, ret_type} -> ret_type end)
-        unified_ret_type = unify_types_simple(ret_types)
+        unified_ret_type = join_types_list(ret_types)
         func_type = {:fn, param_types, unified_ret_type}
         {:ok, func_type, {:defn_multi, name, arity, Enum.reverse(typed_clauses), func_type}}
       error -> error
@@ -1260,11 +1274,14 @@ defmodule Vaisto.TypeChecker do
   # Generate a deterministic type variable ID for a field access
   # This ensures that accessing the same field on the same row variable
   # produces the same type variable, enabling proper constraint solving
+  # ID space partitioning:
+  #   0          .. 9_999         : Parser-assigned tvars
+  #   10_000     .. 99_999_999    : fresh_tvar_id (unique_integer + 10_000)
+  #   100_000_000 .. +∞           : fresh_field_tvar_id (deterministic, hash-based)
+  @field_tvar_base 100_000_000
   defp fresh_field_tvar_id(base_id, field) do
-    # Use a large offset plus hash to avoid collisions with user-defined tvars
-    # The hash ensures different fields get different IDs
-    field_hash = :erlang.phash2(field, 1000)
-    1_000_000 + base_id * 1000 + field_hash
+    field_hash = :erlang.phash2(field, 1_000_000)
+    @field_tvar_base + base_id * 1_000_000 + field_hash
   end
 
   # Strip location from fn AST nodes
@@ -1486,8 +1503,8 @@ defmodule Vaisto.TypeChecker do
   defp resolve_class_constraints(constraints, method_name, ret_type, typed_args, arg_types, env) do
     instances = Map.get(env, :__instances__, %{})
 
-    # For each constraint, try to resolve the concrete type
-    Enum.reduce_while(constraints, {:ok, nil}, fn {class_name, constraint_type}, _acc ->
+    # For each constraint, try to resolve the concrete type, accumulating results
+    Enum.reduce_while(constraints, {:ok, []}, fn {class_name, constraint_type}, {:ok, acc} ->
       # The constraint type should be concrete after unification with args
       concrete_type = resolve_constraint_type(constraint_type, arg_types)
       instance_key = normalize_instance_type(concrete_type)
@@ -1501,7 +1518,7 @@ defmodule Vaisto.TypeChecker do
           case Map.get(instances, {class_name, instance_key}) do
             # Virtual instance (inside constrained instance body) → constraint_call
             {:virtual, idx, _methods} ->
-              {:cont, {:ok, {:constraint_call, idx, method_name, typed_args, ret_type}}}
+              {:cont, {:ok, [{:constraint_call, idx, method_name, typed_args, ret_type} | acc]}}
 
             # Constrained instance at call site → resolve sub-constraints
             {:constrained, inst_type_params, inst_constraints, _methods} ->
@@ -1511,14 +1528,14 @@ defmodule Vaisto.TypeChecker do
               )
               case resolved do
                 {:ok, resolved_constraints} ->
-                  {:cont, {:ok, {:class_call, class_name, method_name, instance_key, typed_args, ret_type, resolved_constraints}}}
+                  {:cont, {:ok, [{:class_call, class_name, method_name, instance_key, typed_args, ret_type, resolved_constraints} | acc]}}
                 {:error, _} = err ->
                   {:halt, err}
               end
 
             # Regular (unconstrained) instance
             methods when is_map(methods) ->
-              {:cont, {:ok, {:class_call, class_name, method_name, instance_key, typed_args, ret_type}}}
+              {:cont, {:ok, [{:class_call, class_name, method_name, instance_key, typed_args, ret_type} | acc]}}
 
             nil ->
               {:halt, {:error, Error.new("no instance of `#{class_name}` for type `#{Vaisto.TypeSystem.Core.format_type(concrete_type)}`")}}
@@ -1526,14 +1543,14 @@ defmodule Vaisto.TypeChecker do
       end
     end)
     |> case do
-      {:ok, nil} ->
+      {:ok, []} ->
         {:ok, ret_type, {:call, method_name, typed_args, ret_type}}
-      {:ok, {:class_call, _, _, _, _, _, _} = class_call} ->
-        {:ok, ret_type, class_call}
-      {:ok, {:class_call, class_name, method_name, concrete_type, typed_args, ret_type}} ->
-        {:ok, ret_type, {:class_call, class_name, method_name, concrete_type, typed_args, ret_type}}
-      {:ok, {:constraint_call, idx, method_name, typed_args, ret_type}} ->
-        {:ok, ret_type, {:constraint_call, idx, method_name, typed_args, ret_type}}
+      {:ok, [single]} ->
+        {:ok, ret_type, single}
+      {:ok, multiple} ->
+        # Multiple constraints resolved — use the last one (which is the primary class dispatch)
+        # since all others are validation-only constraints
+        {:ok, ret_type, List.last(multiple)}
       {:ok, ret_type, ast} ->
         {:ok, ret_type, ast}
       {:error, _} = err ->
@@ -1846,19 +1863,19 @@ defmodule Vaisto.TypeChecker do
       {:error, _} = err -> err
       nil ->
         typed_clauses = Enum.map(results, fn {:ok, clause} -> clause end)
-        [{_pattern, _body, result_type} | rest_clauses] = typed_clauses
+        [{_pattern, _body, first_type} | rest_clauses] = typed_clauses
 
-        # Verify all branches return compatible types
-        branch_error = Enum.find_value(rest_clauses, fn {_, _, body_type} ->
-          case unify_types(result_type, body_type) do
-            {:ok, _} -> nil
-            {:error, _} = err -> err
+        # Unify all branch types, accumulating the result (e.g. int+float→float)
+        unified_result = Enum.reduce_while(rest_clauses, {:ok, first_type}, fn {_, _, body_type}, {:ok, acc_type} ->
+          case unify_types(acc_type, body_type) do
+            {:ok, unified} -> {:cont, {:ok, unified}}
+            {:error, _} = err -> {:halt, err}
           end
         end)
 
-        case branch_error do
+        case unified_result do
           {:error, _} = err -> err
-          nil ->
+          {:ok, result_type} ->
             # Exhaustiveness check for sum types
             case check_exhaustiveness(clauses, expr_type) do
               :ok -> {:ok, result_type, typed_clauses}
@@ -2389,6 +2406,51 @@ defmodule Vaisto.TypeChecker do
     {:ok, :any}
   end
 
+  # Polymorphic call unification — uses real unification to enforce that
+  # type variables shared across parameters resolve consistently.
+  # E.g., (== : forall a. a -> a -> bool) rejects (== 1 "hello")
+  # Uses types_match? as fallback for :any and other types that Unify doesn't handle.
+  defp unify_call_poly({:fn, expected_args, ret_type}, actual_args, original_args) do
+    if length(expected_args) != length(actual_args) do
+      {:error, Errors.arity_mismatch(:function, length(expected_args), length(actual_args))}
+    else
+      result = Enum.zip([expected_args, actual_args, original_args ++ List.duplicate(nil, length(actual_args))])
+        |> Enum.with_index()
+        |> Enum.reduce_while({:ok, %{}}, fn {{exp, act, _orig}, idx}, {:ok, subst} ->
+          resolved_exp = Vaisto.TypeSystem.Core.apply_subst(subst, exp)
+          # :any is compatible with everything — skip unification for it
+          cond do
+            resolved_exp == :any or act == :any ->
+              # If exp is a tvar, bind it to :any so subsequent args see consistency
+              case exp do
+                {:tvar, id} -> {:cont, {:ok, Map.put_new(subst, id, :any)}}
+                _ -> {:cont, {:ok, subst}}
+              end
+
+            true ->
+              case Vaisto.TypeSystem.Unify.unify(resolved_exp, act, subst) do
+                {:ok, new_subst, _} -> {:cont, {:ok, new_subst}}
+                {:error, _} ->
+                  # Allow numeric widening (int ↔ float) for polymorphic args
+                  if numeric_compatible?(resolved_exp, act) do
+                    case exp do
+                      {:tvar, id} -> {:cont, {:ok, Map.put(subst, id, :num)}}
+                      _ -> {:cont, {:ok, subst}}
+                    end
+                  else
+                    {:halt, {:error, Errors.type_mismatch(resolved_exp, act, note: "at argument #{idx + 1}")}}
+                  end
+              end
+          end
+        end)
+
+      case result do
+        {:ok, subst} -> {:ok, Vaisto.TypeSystem.Core.apply_subst(subst, ret_type)}
+        {:error, _} = err -> err
+      end
+    end
+  end
+
   # Extract location from AST node (location is always the last element of tuple AST nodes)
   defp extract_loc(nil), do: nil
   defp extract_loc(tuple) when is_tuple(tuple) do
@@ -2400,6 +2462,9 @@ defmodule Vaisto.TypeChecker do
   end
   defp extract_loc(_), do: nil
 
+  # Boolean subtype check — returns true if two types are structurally compatible.
+  # Used by `unify_call/3` to validate argument types against parameter types.
+  # Does NOT produce a substitution or a unified result type.
   defp types_match?(:any, _), do: true
   defp types_match?(_, :any), do: true
   # Type variables match anything (for parametric polymorphism)
@@ -2473,8 +2538,12 @@ defmodule Vaisto.TypeChecker do
     {:error, Errors.type_mismatch(:num, t1, hint: "#{op} requires numeric operands, got #{inspect(t1)} and #{inspect(t2)}")}
   end
 
-  # Unify two types for branch expressions - returns the unified type or error
-  # This is used when branches need to return the same type (if, match, cond)
+  @numeric_types [:int, :float, :num]
+  defp numeric_compatible?(t1, t2), do: t1 in @numeric_types and t2 in @numeric_types
+
+  # Branch-arm unifier — returns `{:ok, unified_type}` or `{:error, msg}`.
+  # Used when branches must return compatible types (if/match/cond).
+  # Handles numeric widening (int+float→float) but does NOT produce a substitution.
   defp unify_types(t, t), do: {:ok, t}
   defp unify_types(:any, t), do: {:ok, t}
   defp unify_types(t, :any), do: {:ok, t}
@@ -2969,7 +3038,7 @@ defmodule Vaisto.TypeChecker do
     end)
 
     # Unify all pattern types to get the most specific type
-    unified = unify_types_simple(pattern_types)
+    unified = join_types_list(pattern_types)
     List.duplicate(unified, arity)
   end
 
@@ -2983,38 +3052,40 @@ defmodule Vaisto.TypeChecker do
   defp infer_pattern_type({:call, _, _}), do: :any  # Record/variant pattern
   defp infer_pattern_type(_), do: :any
 
-  # Simple type unification for multi-clause functions
-  # Returns the most specific type that's compatible with all inputs
-  defp unify_types_simple([]), do: :any
-  defp unify_types_simple([t]), do: t
-  defp unify_types_simple([t1 | rest]) do
-    Enum.reduce(rest, t1, &unify_two_simple/2)
+  # Least-upper-bound across a list of types — used for multi-clause function
+  # parameter types. Never fails: incompatible types fall back to :any.
+  defp join_types_list([]), do: :any
+  defp join_types_list([t]), do: t
+  defp join_types_list([t1 | rest]) do
+    Enum.reduce(rest, t1, &join_types/2)
   end
 
-  # Unify two types, returning the most specific compatible type
-  defp unify_two_simple(:any, t), do: t
-  defp unify_two_simple(t, :any), do: t
-  defp unify_two_simple(t, t), do: t
-  defp unify_two_simple({:list, e1}, {:list, e2}), do: {:list, unify_two_simple(e1, e2)}
-  defp unify_two_simple({:fn, a1, r1}, {:fn, a2, r2}) when length(a1) == length(a2) do
-    unified_args = Enum.zip(a1, a2) |> Enum.map(fn {x, y} -> unify_two_simple(x, y) end)
-    {:fn, unified_args, unify_two_simple(r1, r2)}
+  # Least-upper-bound of two types — never fails, falls back to :any.
+  # Used for multi-clause parameter unification where we want the broadest
+  # compatible type rather than an error.
+  defp join_types(:any, t), do: t
+  defp join_types(t, :any), do: t
+  defp join_types(t, t), do: t
+  defp join_types({:list, e1}, {:list, e2}), do: {:list, join_types(e1, e2)}
+  defp join_types({:fn, a1, r1}, {:fn, a2, r2}) when length(a1) == length(a2) do
+    unified_args = Enum.zip(a1, a2) |> Enum.map(fn {x, y} -> join_types(x, y) end)
+    {:fn, unified_args, join_types(r1, r2)}
   end
-  defp unify_two_simple({:record, n, f1}, {:record, n, f2}) do
+  defp join_types({:record, n, f1}, {:record, n, f2}) do
     # Same record name, unify fields
-    {:record, n, unify_fields_simple(f1, f2)}
+    {:record, n, join_fields(f1, f2)}
   end
-  defp unify_two_simple({:sum, n, v1}, {:sum, n, v2}) when v1 == v2 do
+  defp join_types({:sum, n, v1}, {:sum, n, v2}) when v1 == v2 do
     {:sum, n, v1}
   end
-  defp unify_two_simple(_, _), do: :any  # Incompatible types fall back to :any
+  defp join_types(_, _), do: :any  # Incompatible types fall back to :any
 
-  defp unify_fields_simple(f1, f2) do
+  defp join_fields(f1, f2) do
 
     map2 = Map.new(f2)
     Enum.map(f1, fn {name, type1} ->
       type2 = Map.get(map2, name, :any)
-      {name, unify_two_simple(type1, type2)}
+      {name, join_types(type1, type2)}
     end)
   end
 

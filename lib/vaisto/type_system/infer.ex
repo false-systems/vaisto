@@ -789,7 +789,7 @@ defmodule Vaisto.TypeSystem.Infer do
   defp infer_pattern(n, scrutinee_type, ctx) when is_integer(n) do
     case Context.unify_types(ctx, scrutinee_type, :int) do
       {:ok, ctx} -> {:ok, [], {:lit, :int, n}, ctx}
-      {:error, _} -> {:ok, [], {:lit, :int, n}, ctx}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -797,7 +797,7 @@ defmodule Vaisto.TypeSystem.Infer do
   defp infer_pattern(f, scrutinee_type, ctx) when is_float(f) do
     case Context.unify_types(ctx, scrutinee_type, :float) do
       {:ok, ctx} -> {:ok, [], {:lit, :float, f}, ctx}
-      {:error, _} -> {:ok, [], {:lit, :float, f}, ctx}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -805,14 +805,14 @@ defmodule Vaisto.TypeSystem.Infer do
   defp infer_pattern(true, scrutinee_type, ctx) do
     case Context.unify_types(ctx, scrutinee_type, :bool) do
       {:ok, ctx} -> {:ok, [], {:lit, :bool, true}, ctx}
-      {:error, _} -> {:ok, [], {:lit, :bool, true}, ctx}
+      {:error, reason} -> {:error, reason}
     end
   end
 
   defp infer_pattern(false, scrutinee_type, ctx) do
     case Context.unify_types(ctx, scrutinee_type, :bool) do
       {:ok, ctx} -> {:ok, [], {:lit, :bool, false}, ctx}
-      {:error, _} -> {:ok, [], {:lit, :bool, false}, ctx}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -825,7 +825,7 @@ defmodule Vaisto.TypeSystem.Infer do
   defp infer_pattern({:string, s}, scrutinee_type, ctx) do
     case Context.unify_types(ctx, scrutinee_type, :string) do
       {:ok, ctx} -> {:ok, [], {:lit, :string, s}, ctx}
-      {:error, _} -> {:ok, [], {:lit, :string, s}, ctx}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -835,8 +835,8 @@ defmodule Vaisto.TypeSystem.Infer do
     case Context.unify_types(ctx, scrutinee_type, {:list, elem_tvar}) do
       {:ok, ctx} ->
         {:ok, [], {:list_pattern, [], {:list, elem_tvar}}, ctx}
-      {:error, _} ->
-        {:ok, [], {:list_pattern, [], {:list, elem_tvar}}, ctx}
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

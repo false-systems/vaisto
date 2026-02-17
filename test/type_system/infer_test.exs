@@ -809,4 +809,34 @@ defmodule Vaisto.TypeSystem.InferTest do
       assert Core.format_type({:list, :int}) == "List(Int)"
     end
   end
+
+  describe "pattern type mismatch detection" do
+    test "integer literal pattern against string scrutinee errors" do
+      # (match "hello" [42 ...]) should fail — int pattern can't match string
+      assert {:error, _msg} = Infer.infer(
+        {:match, {:string, "hello"}, [{42, {:string, "matched"}}]}
+      )
+    end
+
+    test "string literal pattern against int scrutinee errors" do
+      # (match 42 ["hello" ...]) should fail — string pattern can't match int
+      assert {:error, _msg} = Infer.infer(
+        {:match, 42, [{{:string, "hello"}, {:string, "matched"}}]}
+      )
+    end
+
+    test "float literal pattern against string scrutinee errors" do
+      # (match "hello" [3.14 ...]) should fail — float pattern can't match string
+      assert {:error, _msg} = Infer.infer(
+        {:match, {:string, "hello"}, [{3.14, {:string, "matched"}}]}
+      )
+    end
+
+    test "empty list pattern against int scrutinee errors" do
+      # (match 42 [[] ...]) should fail — list pattern can't match int
+      assert {:error, _msg} = Infer.infer(
+        {:match, 42, [{[], {:string, "empty"}}]}
+      )
+    end
+  end
 end

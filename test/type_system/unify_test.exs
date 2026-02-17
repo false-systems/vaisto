@@ -127,6 +127,34 @@ defmodule Vaisto.TypeSystem.UnifyTest do
     end
   end
 
+  describe "unify/3 with row types (same tail rvar)" do
+    test "same rvar tail, no extras on either side succeeds" do
+      # Two rows with same fields and same open tail — should unify trivially
+      r1 = {:row, [{:x, :int}], {:rvar, 5}}
+      r2 = {:row, [{:x, :int}], {:rvar, 5}}
+      assert {:ok, _subst, _} = Unify.unify(r1, r2)
+    end
+
+    test "same rvar tail with extra fields on both sides errors" do
+      # Row 1 has :y, Row 2 has :z — same tail can't absorb both
+      r1 = {:row, [{:x, :int}, {:y, :bool}], {:rvar, 5}}
+      r2 = {:row, [{:x, :int}, {:z, :string}], {:rvar, 5}}
+      assert {:error, msg} = Unify.unify(r1, r2)
+      assert msg =~ "same row variable"
+    end
+
+    test "different rvar tails with extras still works" do
+      # Different tails — existing cross-bind logic handles this
+      r1 = {:row, [{:x, :int}, {:y, :bool}], {:rvar, 5}}
+      r2 = {:row, [{:x, :int}, {:z, :string}], {:rvar, 6}}
+      assert {:ok, subst, _} = Unify.unify(r1, r2)
+      # tail1 (rvar 5) should contain z from r2
+      resolved = Core.apply_subst(subst, {:rvar, 5})
+      assert {:row, fields, _} = resolved
+      assert Enum.any?(fields, fn {name, _} -> name == :z end)
+    end
+  end
+
   describe "occurs check" do
     test "prevents infinite types" do
       # Trying to unify a with List(a) should fail

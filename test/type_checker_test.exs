@@ -313,4 +313,47 @@ defmodule Vaisto.TypeCheckerTest do
       assert type == :int
     end
   end
+
+  describe "polymorphic == and != operators" do
+    test "(== 1 2) passes — same type" do
+      ast = Vaisto.Parser.parse("(== 1 2)")
+      assert {:ok, :bool, _} = TypeChecker.check(ast)
+    end
+
+    test "(== 1 \"a\") errors — different types" do
+      ast = Vaisto.Parser.parse(~s|(== 1 "a")|)
+      assert {:error, _} = TypeChecker.check(ast)
+    end
+
+    test "(!= 1 \"a\") errors — different types" do
+      ast = Vaisto.Parser.parse(~s|(!= 1 "a")|)
+      assert {:error, _} = TypeChecker.check(ast)
+    end
+
+    test "(== 1 1.0) passes — numeric widening" do
+      ast = Vaisto.Parser.parse("(== 1 1.0)")
+      assert {:ok, :bool, _} = TypeChecker.check(ast)
+    end
+  end
+
+  describe "match clause type unification" do
+    test "match with int and float arms unifies to float" do
+      code = """
+      (match true [true 1] [false 1.5])
+      """
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :float, {:match, _, _, :float}} = TypeChecker.check(ast)
+    end
+
+    test "match with defn returning consistent type across arms" do
+      code = """
+      (defn f [x :int] :int
+        (match x
+          [0 42]
+          [_ x]))
+      """
+      ast = Vaisto.Parser.parse(code)
+      assert {:ok, {:fn, [:int], :int}, _} = TypeChecker.check(ast)
+    end
+  end
 end

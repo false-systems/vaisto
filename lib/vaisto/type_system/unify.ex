@@ -316,15 +316,29 @@ defmodule Vaisto.TypeSystem.Unify do
 
       # Both open - use the counter for fresh row variable
       match?({:rvar, _}, tail1) and match?({:rvar, _}, tail2) ->
-        # Generate a fresh row variable using the counter
-        fresh_tail = {:rvar, row_counter}
-        new_counter = row_counter + 1
+        if tail1 == tail2 do
+          # Same rvar on both sides — can't bind it twice without clobbering
+          cond do
+            map_size(only_in_1) == 0 and map_size(only_in_2) == 0 ->
+              # No extras on either side — already consistent
+              {:ok, subst, row_counter}
 
-        # tail1 = only_in_2 ++ fresh_tail
-        # tail2 = only_in_1 ++ fresh_tail
-        with {:ok, subst} <- bind_row_var(tail1, {:row, Map.to_list(only_in_2), fresh_tail}, subst),
-             {:ok, subst} <- bind_row_var(tail2, {:row, Map.to_list(only_in_1), fresh_tail}, subst) do
-          {:ok, subst, new_counter}
+            true ->
+              # Extras on either side is a contradiction: the same tail
+              # can't simultaneously contain different extra fields
+              {:error, "cannot unify rows: same row variable but incompatible extra fields #{inspect(Map.keys(only_in_1))} vs #{inspect(Map.keys(only_in_2))}"}
+          end
+        else
+          # Different rvars — generate fresh tail and cross-bind
+          fresh_tail = {:rvar, row_counter}
+          new_counter = row_counter + 1
+
+          # tail1 = only_in_2 ++ fresh_tail
+          # tail2 = only_in_1 ++ fresh_tail
+          with {:ok, subst} <- bind_row_var(tail1, {:row, Map.to_list(only_in_2), fresh_tail}, subst),
+               {:ok, subst} <- bind_row_var(tail2, {:row, Map.to_list(only_in_1), fresh_tail}, subst) do
+            {:ok, subst, new_counter}
+          end
         end
 
       true ->

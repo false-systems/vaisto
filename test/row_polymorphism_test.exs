@@ -188,4 +188,42 @@ defmodule Vaisto.RowPolymorphismTest do
       assert formatted == "{name: String}"
     end
   end
+
+  describe "field tvar ID partitioning" do
+    test "field tvar IDs are >= 100_000_000" do
+      code = "(defn get-x [r] (. r :x))"
+      ast = Vaisto.Parser.parse(code)
+      {:ok, _type, typed_ast} = TypeChecker.check(ast)
+
+      # Extract field tvar IDs from the typed AST
+      tvar_ids = extract_tvar_ids(typed_ast)
+      field_tvars = Enum.filter(tvar_ids, &(&1 >= 100_000_000))
+      assert length(field_tvars) > 0, "Expected field tvar IDs >= 100_000_000"
+    end
+
+    test "different fields on same record produce distinct tvars" do
+      code = "(defn sum-fields [r] (+ (. r :x) (. r :y)))"
+      ast = Vaisto.Parser.parse(code)
+      {:ok, _type, typed_ast} = TypeChecker.check(ast)
+
+      # Extract the two field accesses from the + call body
+      {:defn, :"sum-fields", [:r], body, _} = typed_ast
+      {:call, :+, [field1, field2], _} = body
+      {:field_access, _, :x, {:tvar, id1}, _} = field1
+      {:field_access, _, :y, {:tvar, id2}, _} = field2
+      assert id1 != id2, "Different fields should have different tvar IDs"
+    end
+  end
+
+  defp extract_tvar_ids(ast) when is_tuple(ast) do
+    case ast do
+      {:tvar, id} -> [id]
+      _ ->
+        ast
+        |> Tuple.to_list()
+        |> Enum.flat_map(&extract_tvar_ids/1)
+    end
+  end
+  defp extract_tvar_ids(list) when is_list(list), do: Enum.flat_map(list, &extract_tvar_ids/1)
+  defp extract_tvar_ids(_), do: []
 end

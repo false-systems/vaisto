@@ -1096,6 +1096,25 @@ defmodule Vaisto.TypeClassTest do
   defp find_class_call(ast) when is_list(ast) do
     Enum.find_value(ast, &find_class_call/1)
   end
+  describe "multi-constraint resolution" do
+    test "instance with two where constraints type checks" do
+      code = """
+      (deftype Pair [fst :int snd :int])
+      (instance Eq Pair
+        (eq [a b] true))
+      (instance Show Pair
+        (show [x] "pair"))
+      (deftype Box (MkBox v))
+      (instance Show (Box a) where [(Show a) (Eq a)]
+        (show [x] (match x
+          [(MkBox v) (str "Box(" (show v) ")")])))
+      (show (MkBox (Pair 1 2)))
+      """
+      ast = Parser.parse(code)
+      assert {:ok, :module, _} = TypeChecker.check(ast)
+    end
+  end
+
   defp find_class_call({:class_call, _, _, _, _, _, _} = call), do: call
   defp find_class_call(tuple) when is_tuple(tuple) do
     tuple
