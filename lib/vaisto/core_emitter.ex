@@ -1373,8 +1373,12 @@ defmodule Vaisto.CoreEmitter do
 
   # Constrained class call at call site: construct constraint dicts and pass to dict function
   defp emit_constrained_class_call(class_name, method_name, concrete_type, arg_cores, resolved_constraints) do
-    constraint_dicts = Enum.map(resolved_constraints, fn {c_class, c_type} ->
-      build_constraint_dict(c_class, c_type)
+    constraint_dicts = Enum.map(resolved_constraints, fn
+      {:constraint_ref, idx} ->
+        # Forward the constraint dict parameter (inside constrained instance body)
+        :cerl.c_var(:"__constraint_#{idx}")
+      {c_class, c_type} ->
+        build_constraint_dict(c_class, c_type)
     end)
     dict_fn_name = dict_function_name(class_name, concrete_type)
     dict_call = :cerl.c_apply(:cerl.c_fname(dict_fn_name, length(constraint_dicts)), constraint_dicts)
@@ -1395,9 +1399,14 @@ defmodule Vaisto.CoreEmitter do
   defp build_constraint_dict(:Show, :float), do: build_builtin_show_float_dict()
   defp build_constraint_dict(:Show, :string), do: build_builtin_show_string_dict()
   defp build_constraint_dict(:Show, :bool), do: build_builtin_show_bool_dict()
-  # Unresolvable type param (e.g., nullary constructor) — build dummy dict
-  defp build_constraint_dict(:Show, :any), do: build_builtin_show_string_dict()
-  defp build_constraint_dict(:Eq, :any), do: build_builtin_eq_dict()
+  defp build_constraint_dict(:Show, :atom), do: build_builtin_show_bool_dict()  # atoms use atom_to_binary too
+  # Unresolvable type param (e.g., nullary constructor) — build dummy dict that won't be called
+  defp build_constraint_dict(_class, :any) do
+    # Build a minimal 1-element tuple with a no-op function as placeholder
+    x = :cerl.c_var(:__dummy_x)
+    dummy_fn = :cerl.c_fun([x], x)
+    :cerl.c_tuple([dummy_fn])
+  end
   defp build_constraint_dict(class_name, concrete_type) do
     # User-defined unconstrained instance: call __dict_Class_Type/0
     :cerl.c_apply(:cerl.c_fname(dict_function_name(class_name, concrete_type), 0), [])
@@ -1467,7 +1476,7 @@ defmodule Vaisto.CoreEmitter do
     # During constrained instance dict generation, we store the constraint-to-class mapping
     constraint_classes = Process.get(:__vaisto_constraint_classes__, %{})
     case Map.get(constraint_classes, idx) do
-      nil -> 1
+      nil -> raise "compiler bug: constraint class not found for index #{idx} (method: #{method_name})"
       class_name -> get_method_index(class_name, method_name)
     end
   end
@@ -1510,27 +1519,27 @@ defmodule Vaisto.CoreEmitter do
         |> Map.new(fn {{c_class, _c_tvar}, idx} -> {idx, c_class} end)
       Process.put(:__vaisto_constraint_classes__, constraint_classes)
 
-      # Arity = number of constraints (one dict param per constraint)
-      constraint_params = Enum.with_index(constraints) |> Enum.map(fn {_, idx} ->
-        :cerl.c_var(:"__constraint_#{idx}")
-      end)
+      try do
+        # Arity = number of constraints (one dict param per constraint)
+        constraint_params = Enum.with_index(constraints) |> Enum.map(fn {_, idx} ->
+          :cerl.c_var(:"__constraint_#{idx}")
+        end)
 
-      fname = :cerl.c_fname(dict_fn_name, length(constraints))
+        fname = :cerl.c_fname(dict_fn_name, length(constraints))
 
-      method_closures = Enum.map(methods, fn {_method_name, params, typed_body} ->
-        param_vars = Enum.map(params, &:cerl.c_var/1)
-        local_vars = MapSet.new(params)
-        body_core = to_core_expr(typed_body, user_fns, local_vars)
-        :cerl.c_fun(param_vars, body_core)
-      end)
+        method_closures = Enum.map(methods, fn {_method_name, params, typed_body} ->
+          param_vars = Enum.map(params, &:cerl.c_var/1)
+          local_vars = MapSet.new(params)
+          body_core = to_core_expr(typed_body, user_fns, local_vars)
+          :cerl.c_fun(param_vars, body_core)
+        end)
 
-      dict_tuple = :cerl.c_tuple(method_closures)
-      fun = :cerl.c_fun(constraint_params, dict_tuple)
-
-      # Clean up process dict
-      Process.delete(:__vaisto_constraint_classes__)
-
-      {fname, fun}
+        dict_tuple = :cerl.c_tuple(method_closures)
+        fun = :cerl.c_fun(constraint_params, dict_tuple)
+        {fname, fun}
+      after
+        Process.delete(:__vaisto_constraint_classes__)
+      end
     end)
 
     unconstrained ++ constrained

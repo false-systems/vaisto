@@ -886,4 +886,102 @@ defmodule Vaisto.TypeClassTest do
       assert "Just(green)" == Runner.call(mod, :main)
     end
   end
+
+  # =========================================================================
+  # Constrained Instances — Default Methods
+  # =========================================================================
+
+  describe "codegen: constrained instance with default methods" do
+    test "neq inherited by constrained Eq instance" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (instance Eq (Maybe a) where [(Eq a)]
+        (eq [x y] (== x y)))
+      (neq (Just 1) (Just 2))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedNeqDefault, backend: :core)
+      assert true == Runner.call(mod, :main)
+    end
+
+    test "neq returns false when equal" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (instance Eq (Maybe a) where [(Eq a)]
+        (eq [x y] (== x y)))
+      (neq (Just 1) (Just 1))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedNeqSame, backend: :core)
+      assert false == Runner.call(mod, :main)
+    end
+  end
+
+  # =========================================================================
+  # Constrained Instances — In defn and let
+  # =========================================================================
+
+  describe "codegen: constrained instance in defn" do
+    test "constrained show called from defn" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (instance Show (Maybe a) where [(Show a)]
+        (show [x] (match x
+          [(Just v) (str "Just(" (show v) ")")]
+          [(Nothing) "Nothing"])))
+      (defn show-int-maybe [x :int] :string
+        (show (Just x)))
+      (show-int-maybe 99)
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedInDefn, backend: :core)
+      assert "Just(99)" == Runner.call(mod, :main)
+    end
+  end
+
+  describe "codegen: constrained instance in let" do
+    test "constrained show in let binding" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (instance Show (Maybe a) where [(Show a)]
+        (show [x] (match x
+          [(Just v) (str "Just(" (show v) ")")]
+          [(Nothing) "Nothing"])))
+      (let [s (show (Just 42))] s)
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedInLet, backend: :core)
+      assert "Just(42)" == Runner.call(mod, :main)
+    end
+  end
+
+  # =========================================================================
+  # Constrained Instances — Error Cases
+  # =========================================================================
+
+  describe "error: constrained instance errors" do
+    test "unknown class in where clause errors" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (instance Show (Maybe a) where [(NonExistent a)]
+        (show [x] "hi"))
+      (show (Just 1))
+      """
+      ast = Parser.parse(code)
+      result = TypeChecker.check(ast)
+      assert {:error, _} = result
+    end
+
+    test "unsatisfied constraint includes context message" do
+      code = """
+      (deftype Wrapper (Wrap v))
+      (deftype Maybe (Just v) (Nothing))
+      (instance Show (Maybe a) where [(Show a)]
+        (show [x] "hi"))
+      (show (Just (Wrap 1)))
+      """
+      ast = Parser.parse(code)
+      {:error, errs} = TypeChecker.check(ast)
+      err = if is_list(errs), do: hd(errs), else: errs
+      msg = error_text(err)
+      assert msg =~ "no instance of"
+      assert msg =~ "required by constrained instance"
+    end
+  end
 end

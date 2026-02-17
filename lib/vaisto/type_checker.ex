@@ -1125,7 +1125,10 @@ defmodule Vaisto.TypeChecker do
           method_sig_map = Map.new(method_sigs)
 
           # Register virtual instances for constraints
-          env_with_virtuals = register_virtual_instances(constraints, env)
+          env_with_virtuals = case register_virtual_instances(constraints, env) do
+            {:error, _} = err -> throw(err)
+            {:ok, env_v} -> env_v
+          end
 
           typed_methods = Enum.map(all_methods, fn {method_name, params, body} ->
             expected_type = Vaisto.TypeSystem.Core.apply_subst(subst, method_sig_map[method_name])
@@ -1187,11 +1190,12 @@ defmodule Vaisto.TypeChecker do
   # Register virtual instances for constraints during constrained instance body checking
   defp register_virtual_instances(constraints, env) do
     Enum.with_index(constraints)
-    |> Enum.reduce(env, fn {{class_name, tvar}, idx}, acc ->
+    |> Enum.reduce_while({:ok, env}, fn {{class_name, tvar}, idx}, {:ok, acc} ->
       classes = Map.get(acc, :__classes__, %{})
       class_def = Map.get(classes, class_name)
       case class_def do
-        nil -> acc
+        nil ->
+          {:halt, {:error, Error.new("unknown type class `#{class_name}` in constraint")}}
         _ ->
           {class_tvar_ids, method_sigs, _} = extract_class_parts(class_def)
           # Build method types substituting class tvar → constraint tvar (the named param)
@@ -1201,7 +1205,7 @@ defmodule Vaisto.TypeChecker do
           end)
           virtual = {:virtual, idx, concrete}
           instances = Map.get(acc, :__instances__, %{})
-          Map.put(acc, :__instances__, Map.put(instances, {class_name, tvar}, virtual))
+          {:cont, {:ok, Map.put(acc, :__instances__, Map.put(instances, {class_name, tvar}, virtual))}}
       end
     end)
   end
@@ -1554,6 +1558,10 @@ defmodule Vaisto.TypeChecker do
         bound_type != nil ->
           bound_key = normalize_instance_type(bound_type)
           case Map.get(instances, {c_class, bound_key}) do
+            # Virtual instance (inside constrained instance body) — forward constraint ref
+            {:virtual, vidx, _} ->
+              {:cont, {:ok, acc ++ [{:constraint_ref, vidx}]}}
+
             nil ->
               {:halt, {:error, Error.new(
                 "no instance of `#{c_class}` for type `#{Vaisto.TypeSystem.Core.format_type(bound_type)}`\n" <>
@@ -1575,21 +1583,29 @@ defmodule Vaisto.TypeChecker do
 
   # Extract type param bindings by looking at the typed arguments of the call.
   # For `(show (Just 42))`, the typed_arg is `{:call, :Just, [{:lit, :int, 42}], sum_type}`.
-  # We extract the inner concrete types from constructor args.
+  # Extract type param bindings by looking at the typed arguments of the call.
+  # For `(show (Just 42))`, the typed_arg is `{:call, :Just, [{:lit, :int, 42}], sum_type}`.
+  # We match only the relevant constructor variant to avoid index collisions.
   defp extract_type_param_bindings({:sum, _, p_variants}, _concrete_type, type_params, typed_args) do
     tvar_ids = p_variants
       |> Enum.flat_map(fn {_, types} -> collect_tvar_ids(types) end)
       |> Enum.uniq()
     tvar_to_param = Enum.zip(tvar_ids, type_params) |> Map.new()
 
-    # Extract inner types from the first typed arg that's a constructor call
-    inner_types = extract_inner_types_from_args(typed_args)
+    # Extract the constructor name and inner types from the first typed arg
+    {ctor_name, inner_types} = extract_inner_types_from_args(typed_args)
 
-    # For each tvar in parameterized type, find the matching concrete type
-    Enum.zip(p_variants, List.duplicate(nil, length(p_variants)))
-    |> Enum.flat_map(fn {{_ctor, field_types}, _} ->
-      Enum.with_index(field_types)
-    end)
+    # Find the matching variant by constructor name; fall back to all variants
+    target_variants = case ctor_name do
+      nil -> p_variants
+      name -> case Enum.find(p_variants, fn {n, _} -> n == name end) do
+        nil -> p_variants
+        variant -> [variant]
+      end
+    end
+
+    target_variants
+    |> Enum.flat_map(fn {_ctor, field_types} -> Enum.with_index(field_types) end)
     |> Enum.reduce(%{}, fn {field_type, idx}, acc ->
       case field_type do
         {:tvar, id} ->
@@ -1604,19 +1620,31 @@ defmodule Vaisto.TypeChecker do
   end
   defp extract_type_param_bindings(_param, _concrete, _type_params, _typed_args), do: %{}
 
-  # Extract inner types from typed constructor args
-  # (Just 42) → %{0 => :int}
-  # (Nothing) → %{}
+  # Extract constructor name and inner types from typed constructor args
+  # (Just 42) → {:Just, %{0 => :int}}
+  # (Nothing) → {:Nothing, %{}}
+  # variable x : Maybe Int → {nil, bindings extracted from type}
   defp extract_inner_types_from_args(typed_args) do
     case typed_args do
-      [{:call, _ctor, ctor_args, _type} | _] ->
-        ctor_args
-        |> Enum.with_index()
-        |> Map.new(fn {arg, idx} -> {idx, typed_ast_type(arg)} end)
-      [{:lit, :atom, _} | _] ->
+      [{:call, ctor, ctor_args, _type} | _] ->
+        inner = ctor_args
+          |> Enum.with_index()
+          |> Map.new(fn {arg, idx} -> {idx, typed_ast_type(arg)} end)
+        {ctor, inner}
+      [{:lit, :atom, ctor} | _] ->
         # Nullary constructor like (Nothing)
-        %{}
-      _ -> %{}
+        {ctor, %{}}
+      [{:var, _, {:sum, _, c_variants}} | _] ->
+        # Variable with known sum type — extract from first variant with fields
+        case Enum.find(c_variants, fn {_, fields} -> fields != [] end) do
+          {_ctor, fields} ->
+            inner = fields
+              |> Enum.with_index()
+              |> Map.new(fn {type, idx} -> {idx, type} end)
+            {nil, inner}
+          nil -> {nil, %{}}
+        end
+      _ -> {nil, %{}}
     end
   end
 
