@@ -247,6 +247,77 @@ defmodule Vaisto.Errors do
   end
 
   # ============================================================================
+  # Type Class Errors
+  # ============================================================================
+
+  @doc "Reference to an undefined type class"
+  def unknown_type_class(name) do
+    Error.new("unknown type class",
+      note: "`#{name}` is not defined as a type class"
+    )
+  end
+
+  @doc "Reference to an undefined type class in a constraint"
+  def unknown_type_class_in_constraint(name) do
+    Error.new("unknown type class in constraint",
+      note: "`#{name}` is not defined as a type class",
+      hint: "constraints must reference defined type classes"
+    )
+  end
+
+  @doc "Type class instance is missing required methods"
+  def missing_instance_methods(class, type, missing) do
+    missing_str = missing |> Enum.map(&to_string/1) |> Enum.join(", ")
+    Error.new("missing instance methods",
+      note: "instance `#{class}` for `#{format_instance_type(type)}` is missing methods: #{missing_str}",
+      hint: "implement all required methods or provide defaults in the class definition"
+    )
+  end
+
+  @doc "No type class instance exists for a given type"
+  def no_instance_for_type(class, type, opts \\ []) do
+    type_str = Vaisto.TypeFormatter.format(type)
+    note = case Keyword.get(opts, :required_by) do
+      nil -> nil
+      ctx -> "required by constrained instance `#{ctx}`"
+    end
+    Error.new("no instance of `#{class}` for type `#{type_str}`",
+      note: note
+    )
+  end
+
+  @doc "Constraint resolution exceeded maximum depth"
+  def constraint_depth_exceeded do
+    Error.new("constraint resolution depth exceeded",
+      note: "possible infinite chain of constrained instances",
+      hint: "check for circular constraints between type class instances"
+    )
+  end
+
+  @doc "Cannot derive Show for a sum type with fields"
+  def derive_show_has_fields(type) do
+    Error.new("cannot derive Show",
+      note: "`#{type}` has variants with fields",
+      hint: "write a manual `(instance Show #{type} ...)` instead"
+    )
+  end
+
+  @doc "Cannot derive Show for a record type"
+  def derive_show_record(type) do
+    Error.new("cannot derive Show",
+      note: "record type `#{type}` requires a manual Show instance",
+      hint: "write a manual `(instance Show #{type} ...)` instead"
+    )
+  end
+
+  @doc "Derive is not supported for this type class"
+  def derive_not_supported(class) do
+    Error.new("cannot derive `#{class}`",
+      note: "only Eq and Show are derivable"
+    )
+  end
+
+  # ============================================================================
   # Helpers
   # ============================================================================
 
@@ -266,4 +337,7 @@ defmodule Vaisto.Errors do
   defp format_function_name(name) when is_atom(name), do: Atom.to_string(name)
   defp format_function_name(name) when is_binary(name), do: name
   defp format_function_name(name), do: inspect(name)
+
+  defp format_instance_type(type) when is_atom(type), do: Atom.to_string(type)
+  defp format_instance_type(type), do: Vaisto.TypeFormatter.format(type)
 end

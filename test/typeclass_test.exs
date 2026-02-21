@@ -1122,4 +1122,72 @@ defmodule Vaisto.TypeClassTest do
     |> Enum.find_value(&find_class_call/1)
   end
   defp find_class_call(_), do: nil
+
+  # =========================================================================
+  # Structured Type Class Errors
+  # =========================================================================
+
+  describe "structured type class errors" do
+    test "unknown_type_class produces structured error" do
+      err = Vaisto.Errors.unknown_type_class(:Printable)
+      assert %Error{message: "unknown type class"} = err
+      assert err.note =~ "Printable"
+    end
+
+    test "unknown_type_class_in_constraint produces structured error" do
+      err = Vaisto.Errors.unknown_type_class_in_constraint(:Printable)
+      assert %Error{message: "unknown type class in constraint"} = err
+      assert err.note =~ "Printable"
+      assert err.hint != nil
+    end
+
+    test "missing_instance_methods produces structured error" do
+      err = Vaisto.Errors.missing_instance_methods(:Show, :int, [:show, :display])
+      assert %Error{message: "missing instance methods"} = err
+      assert err.note =~ "missing methods"
+      assert err.note =~ "show"
+      assert err.note =~ "display"
+    end
+
+    test "no_instance_for_type produces structured error" do
+      err = Vaisto.Errors.no_instance_for_type(:Show, :int)
+      assert err.message =~ "no instance of"
+      assert err.message =~ "Show"
+      assert err.message =~ "Int"
+    end
+
+    test "no_instance_for_type with required_by includes context" do
+      err = Vaisto.Errors.no_instance_for_type(:Show, :int, required_by: "Show Maybe")
+      text = error_text(err)
+      assert text =~ "no instance of"
+      assert text =~ "required by constrained instance"
+    end
+
+    test "constraint_depth_exceeded produces structured error" do
+      err = Vaisto.Errors.constraint_depth_exceeded()
+      assert %Error{message: "constraint resolution depth exceeded"} = err
+      assert err.note != nil
+      assert err.hint != nil
+    end
+
+    test "derive_show_has_fields produces structured error" do
+      err = Vaisto.Errors.derive_show_has_fields(:Color)
+      assert %Error{message: "cannot derive Show"} = err
+      assert err.note =~ "Color"
+      assert err.hint =~ "manual"
+    end
+
+    test "derive_show_record produces structured error" do
+      err = Vaisto.Errors.derive_show_record(:Point)
+      assert %Error{message: "cannot derive Show"} = err
+      assert err.note =~ "Point"
+    end
+
+    test "derive_not_supported produces structured error" do
+      err = Vaisto.Errors.derive_not_supported(:Functor)
+      assert err.message =~ "cannot derive"
+      assert err.message =~ "Functor"
+      assert err.note =~ "only Eq and Show"
+    end
+  end
 end

@@ -949,7 +949,7 @@ defmodule Vaisto.TypeChecker do
         end)
 
         if length(truly_missing) > 0 do
-          {:error, Error.new("instance #{class_name} #{inspect(for_type)} is missing methods: #{Enum.join(truly_missing, ", ")}")}
+          {:error, Errors.missing_instance_methods(class_name, for_type, truly_missing)}
         else
           # Inject default bodies for missing methods
           injected = Enum.map(with_defaults, fn name ->
@@ -992,7 +992,7 @@ defmodule Vaisto.TypeChecker do
         end
 
       nil ->
-        {:error, Error.new("unknown type class: #{class_name}")}
+        {:error, Errors.unknown_type_class(class_name)}
     end
   catch
     {:error, _} = err -> err
@@ -1014,7 +1014,7 @@ defmodule Vaisto.TypeChecker do
         end)
 
         if length(truly_missing) > 0 do
-          {:error, Error.new("instance #{class_name} #{type_name} is missing methods: #{Enum.join(truly_missing, ", ")}")}
+          {:error, Errors.missing_instance_methods(class_name, type_name, truly_missing)}
         else
           injected = Enum.map(with_defaults, fn name ->
             {:default, param_names, body} = Map.fetch!(defaults, name)
@@ -1065,7 +1065,7 @@ defmodule Vaisto.TypeChecker do
         end
 
       nil ->
-        {:error, Error.new("unknown type class: #{class_name}")}
+        {:error, Errors.unknown_type_class(class_name)}
     end
   catch
     {:error, _} = err -> err
@@ -1122,7 +1122,7 @@ defmodule Vaisto.TypeChecker do
       class_def = Map.get(classes, class_name)
       case class_def do
         nil ->
-          {:halt, {:error, Error.new("unknown type class `#{class_name}` in constraint")}}
+          {:halt, {:error, Errors.unknown_type_class_in_constraint(class_name)}}
         _ ->
           {class_tvar_ids, method_sigs, _} = extract_class_parts(class_def)
           # Build method types substituting class tvar → constraint tvar (the named param)
@@ -1236,7 +1236,7 @@ defmodule Vaisto.TypeChecker do
               {:cont, {:ok, [{:class_call, class_name, method_name, instance_key, typed_args, ret_type} | acc]}}
 
             nil ->
-              {:halt, {:error, Error.new("no instance of `#{class_name}` for type `#{Vaisto.TypeSystem.Core.format_type(concrete_type)}`")}}
+              {:halt, {:error, Errors.no_instance_for_type(class_name, concrete_type)}}
           end
       end
     end)
@@ -1278,10 +1278,7 @@ defmodule Vaisto.TypeChecker do
               {:cont, {:ok, acc ++ [{:constraint_ref, vidx}]}}
 
             nil ->
-              {:halt, {:error, Error.new(
-                "no instance of `#{c_class}` for type `#{Vaisto.TypeSystem.Core.format_type(bound_type)}`\n" <>
-                "  required by constrained instance `#{class_name} #{instance_key}`"
-              )}}
+              {:halt, {:error, Errors.no_instance_for_type(c_class, bound_type, required_by: "#{class_name} #{instance_key}")}}
 
             # Sub-instance is itself constrained — recurse to resolve its constraints
             {:constrained, sub_tp, sub_cs, _sub_methods} ->
@@ -1312,7 +1309,7 @@ defmodule Vaisto.TypeChecker do
   # constrained → recurse to resolve Show Int.
   # Uses inner typed_args (peeled from the parent's typed_args) to extract bindings.
   defp resolve_chained_constraint(_c, _k, _tp, _cs, _concrete, _typed_args, _env, depth) when depth > 10 do
-    {:error, Error.new("constraint resolution depth exceeded (possible infinite chain)")}
+    {:error, Errors.constraint_depth_exceeded()}
   end
 
   defp resolve_chained_constraint(c_class, bound_key, inst_type_params, inst_constraints,
@@ -1340,10 +1337,7 @@ defmodule Vaisto.TypeChecker do
                   {:halt, err}
               end
             nil ->
-              {:halt, {:error, Error.new(
-                "no instance of `#{sub_class}` for type `#{Vaisto.TypeSystem.Core.format_type(sub_bound)}`\n" <>
-                "  required by constrained instance `#{c_class} #{bound_key}`"
-              )}}
+              {:halt, {:error, Errors.no_instance_for_type(sub_class, sub_bound, required_by: "#{c_class} #{bound_key}")}}
             _ ->
               {:cont, {:ok, acc ++ [{sub_class, sub_key}]}}
           end
@@ -2867,7 +2861,7 @@ defmodule Vaisto.TypeChecker do
     has_fields? = Enum.any?(variants, fn {_ctor, fields} -> fields != [] end)
 
     if has_fields? do
-      {:error, Error.new("cannot derive Show for `#{for_type}`: variants with fields require a manual instance")}
+      {:error, Errors.derive_show_has_fields(for_type)}
     else
       match_clauses = Enum.map(variants, fn {ctor_name, []} ->
         {{:call, ctor_name, [], loc}, {:string, Atom.to_string(ctor_name)}}
@@ -2879,11 +2873,11 @@ defmodule Vaisto.TypeChecker do
   end
 
   defp synthesize_and_check_instance(:Show, for_type, {:product, _}, _loc, _env) do
-    {:error, Error.new("cannot derive Show for record type `#{for_type}`")}
+    {:error, Errors.derive_show_record(for_type)}
   end
 
   defp synthesize_and_check_instance(class, _for_type, _type_def, _loc, _env) do
-    {:error, Error.new("cannot derive `#{class}`: only Eq and Show are derivable")}
+    {:error, Errors.derive_not_supported(class)}
   end
 
   # Extract env updates from a typed form
