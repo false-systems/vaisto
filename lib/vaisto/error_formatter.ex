@@ -173,7 +173,10 @@ defmodule Vaisto.ErrorFormatter do
     # Primary pointer with label
     primary_pointer = format_pointer(span, line_content, error)
 
-    [error_line, primary_pointer]
+    # Secondary spans (dashes instead of carets, in blue)
+    secondary_pointers = format_secondary_spans(error.secondary_spans, lines)
+
+    [error_line, primary_pointer | secondary_pointers]
   end
 
   # Simplified pointer format (no gutter)
@@ -210,11 +213,42 @@ defmodule Vaisto.ErrorFormatter do
   end
   defp build_label(_span, _error, _type), do: ""
 
-  # Format note section
+  # Format secondary spans (related code locations, shown with dashes)
+  defp format_secondary_spans([], _lines), do: []
+  defp format_secondary_spans(spans, lines) do
+    Enum.flat_map(spans, fn span ->
+      line_content = Enum.at(lines, span.line - 1, "")
+      # Show the secondary source line if different from primary
+      secondary_line = "    " <> line_content
+
+      prefix = String.slice(line_content, 0, max(span.col - 1, 0))
+      visual_offset = visual_length(prefix)
+      pointer_len = Map.get(span, :length, 1)
+      pointer = String.duplicate("-", max(pointer_len, 1))
+      spacing = String.duplicate(" ", 4 + visual_offset)
+
+      label = if span[:label], do: " #{span.label}", else: ""
+
+      pointer_line = IO.ANSI.format([
+        spacing,
+        :blue, :bright, pointer,
+        :reset, :blue, label,
+        :reset
+      ]) |> IO.iodata_to_binary()
+
+      [secondary_line, pointer_line]
+    end)
+  end
+
+  # Format note section — handles multi-notes separated by "\n  note: "
   defp format_note(%Error{note: nil}), do: nil
   defp format_note(%Error{note: note}) do
-    IO.ANSI.format([:faint, "  note: ", note, :reset])
-    |> IO.iodata_to_binary()
+    note
+    |> String.split("\n  note: ")
+    |> Enum.map(fn line ->
+      IO.ANSI.format([:faint, "  note: ", line, :reset])
+      |> IO.iodata_to_binary()
+    end)
   end
 
   # Format hint/help section

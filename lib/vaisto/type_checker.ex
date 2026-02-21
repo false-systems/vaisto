@@ -688,13 +688,13 @@ defmodule Vaisto.TypeChecker do
           inst_fn_type = Vaisto.TypeSystem.Core.apply_subst(fresh_subst, fn_type)
 
           with {:ok, arg_types, typed_args, ctx} <- check_args_s(args, ctx),
-               {:ok, ret_type, ctx} <- unify_call_s(inst_fn_type, arg_types, ctx, args) do
+               {:ok, ret_type, ctx} <- unify_call_s(inst_fn_type, arg_types, ctx, args, func) do
             {:ok, ret_type, {:call, func, typed_args, ret_type}, ctx}
           end
 
         _ ->
           with {:ok, arg_types, typed_args, ctx} <- check_args_s(args, ctx),
-               {:ok, ret_type, ctx} <- unify_call_s(func_type, arg_types, ctx, args) do
+               {:ok, ret_type, ctx} <- unify_call_s(func_type, arg_types, ctx, args, func) do
             if is_local_var?(func, ctx.env) do
               {:ok, ret_type, {:apply, {:var, func, func_type}, typed_args, ret_type}, ctx}
             else
@@ -709,7 +709,7 @@ defmodule Vaisto.TypeChecker do
   defp check_impl_s({:call, func, args}, ctx) do
     with {:ok, func_type} <- lookup_function(func, ctx.env),
          {:ok, arg_types, typed_args, ctx} <- check_args_s(args, ctx),
-         {:ok, ret_type, ctx} <- unify_call_s(func_type, arg_types, ctx, args) do
+         {:ok, ret_type, ctx} <- unify_call_s(func_type, arg_types, ctx, args, func) do
       {:ok, ret_type, {:call, func, typed_args, ret_type}, ctx}
     end
   end
@@ -2180,7 +2180,7 @@ defmodule Vaisto.TypeChecker do
   defp check_generic_call_s(func, args, ctx) do
     with {:ok, func_type} <- lookup_function(func, ctx.env),
          {:ok, arg_types, typed_args, ctx} <- check_args_s(args, ctx),
-         {:ok, ret_type, ctx} <- unify_call_s(func_type, arg_types, ctx) do
+         {:ok, ret_type, ctx} <- unify_call_s(func_type, arg_types, ctx, [], func) do
       {:ok, ret_type, {:call, func, typed_args, ret_type}, ctx}
     end
   end
@@ -2198,7 +2198,7 @@ defmodule Vaisto.TypeChecker do
     end)
 
     with {:ok, arg_types, typed_args, ctx} <- check_args_s(args, ctx),
-         {:ok, ret_type, ctx} <- unify_call_s(inst_fn_type, arg_types, ctx, args) do
+         {:ok, ret_type, ctx} <- unify_call_s(inst_fn_type, arg_types, ctx, args, method_name) do
       # Resolve constraints using the old helper (stateless resolution)
       case resolve_class_constraints(inst_constraints, method_name, ret_type, typed_args, arg_types, ctx.env) do
         {:ok, ret_type, ast} -> {:ok, ret_type, ast, ctx}
@@ -2346,7 +2346,7 @@ defmodule Vaisto.TypeChecker do
   defp expect_numeric(:num, _op), do: :ok
   defp expect_numeric(:any, _op), do: :ok
   defp expect_numeric({:tvar, _}, _op), do: :ok  # Type variables are assumed numeric in polymorphic contexts
-  defp expect_numeric(other, op), do: {:error, Errors.type_mismatch(:num, other, hint: "#{op} requires numeric operands")}
+  defp expect_numeric(other, op), do: {:error, Errors.type_mismatch(:num, other, hint: "`#{op}` requires numeric operands")}
 
   # Determine result type for arithmetic operations
   # int op int → int
@@ -2368,7 +2368,8 @@ defmodule Vaisto.TypeChecker do
   defp check_numeric_op(_op, {:tvar, _}, _), do: {:ok, :num}
   defp check_numeric_op(_op, _, {:tvar, _}), do: {:ok, :num}
   defp check_numeric_op(op, t1, t2) do
-    {:error, Errors.type_mismatch(:num, t1, hint: "#{op} requires numeric operands, got #{inspect(t1)} and #{inspect(t2)}")}
+    {:error, Errors.type_mismatch(:num, t1,
+      hint: "`#{op}` requires numeric operands, got `#{Vaisto.TypeFormatter.format(t1)}` and `#{Vaisto.TypeFormatter.format(t2)}`")}
   end
 
   # Stateless compatibility check using real unification (no substitution threaded).
@@ -2404,19 +2405,21 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
-  defp unify_call_s(func_type, actual_args, ctx, original_args \\ [])
+  defp unify_call_s(func_type, actual_args, ctx, original_args, func_name)
 
-  defp unify_call_s({:fn, expected_args, ret_type}, actual_args, ctx, original_args) do
-    unify_call_poly_s({:fn, expected_args, ret_type}, actual_args, ctx, original_args)
+  defp unify_call_s({:fn, expected_args, ret_type}, actual_args, ctx, original_args, func_name) do
+    unify_call_poly_s({:fn, expected_args, ret_type}, actual_args, ctx, original_args, func_name)
   end
 
-  defp unify_call_s(:any, _actual_args, ctx, _original_args) do
+  defp unify_call_s(:any, _actual_args, ctx, _original_args, _func_name) do
     {:ok, :any, ctx}
   end
 
-  defp unify_call_poly_s({:fn, expected_args, ret_type}, actual_args, ctx, original_args) do
+  defp unify_call_poly_s({:fn, expected_args, ret_type}, actual_args, ctx, original_args, func_name) do
+    display_name = format_func_name(func_name)
+
     if length(expected_args) != length(actual_args) do
-      {:error, Errors.arity_mismatch(:function, length(expected_args), length(actual_args))}
+      {:error, Errors.arity_mismatch(display_name || :function, length(expected_args), length(actual_args))}
     else
       padded_orig = original_args ++ List.duplicate(nil, length(actual_args))
 
@@ -2439,7 +2442,18 @@ defmodule Vaisto.TypeChecker do
                     {:tvar, id} = exp
                     {:cont, {:ok, Map.put(subst, id, :num)}}
                   else
-                    {:halt, {:error, Errors.type_mismatch(resolved_exp, act, note: "at argument #{idx + 1}")}}
+                    call_note = if display_name,
+                      do: "in call to `#{display_name}`, at argument #{idx + 1}",
+                      else: "at argument #{idx + 1}"
+
+                    # Explain tvar binding origin when a tvar was bound by an earlier argument
+                    extra_notes = explain_tvar_origin(exp, subst, expected_args, idx)
+                    full_note = case extra_notes do
+                      [] -> call_note
+                      notes -> Enum.join([call_note | notes], "\n  note: ")
+                    end
+
+                    {:halt, {:error, Errors.type_mismatch(resolved_exp, act, note: full_note)}}
                   end
               end
           end
@@ -2451,6 +2465,30 @@ defmodule Vaisto.TypeChecker do
           {:ok, resolved_ret, %{ctx | subst: subst}}
         {:error, _} = err -> err
       end
+    end
+  end
+
+  defp format_func_name(nil), do: nil
+  defp format_func_name(name) when is_atom(name), do: Atom.to_string(name)
+  defp format_func_name({:qualified, mod, func}), do: "#{mod}:#{func}"
+  defp format_func_name({:module_path, parts}), do: Enum.join(parts, ".")
+  defp format_func_name(_name), do: nil
+
+  defp explain_tvar_origin(exp, subst, expected_args, failed_idx) do
+    case exp do
+      {:tvar, id} ->
+        bound_type = Map.get(subst, id)
+        if bound_type do
+          origin_idx = Enum.find_index(expected_args, &match?({:tvar, ^id}, &1))
+          if origin_idx != nil and origin_idx < failed_idx do
+            ["type `#{Vaisto.TypeFormatter.format(bound_type)}` was determined by argument #{origin_idx + 1}"]
+          else
+            []
+          end
+        else
+          []
+        end
+      _ -> []
     end
   end
 

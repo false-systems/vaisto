@@ -130,4 +130,39 @@ defmodule Vaisto.ErrorFormatterTest do
       assert result =~ "a.va:2:1"
     end
   end
+
+  describe "secondary spans" do
+    test "renders secondary spans with dashes" do
+      error = Vaisto.Error.new("type mismatch",
+        span: %{line: 1, col: 8, length: 5, label: nil},
+        expected: :int,
+        actual: :string,
+        secondary_spans: [
+          %{line: 1, col: 4, length: 1, label: "first defined here"}
+        ]
+      )
+      source = "(== 42 \"hey\")"
+
+      result = ErrorFormatter.format(error, source)
+
+      assert result =~ "^^^^^"   # primary pointer
+      assert result =~ "-"       # secondary pointer (dashes)
+      assert result =~ "first defined here"
+    end
+
+    test "renders multi-line notes" do
+      error = Vaisto.Error.new("type mismatch",
+        span: %{line: 1, col: 8, length: 5, label: nil},
+        expected: :int,
+        actual: :string,
+        note: "in call to `==`, at argument 2\n  note: type `Int` was determined by argument 1"
+      )
+      source = "(== 42 \"hey\")"
+
+      result = ErrorFormatter.format(error, source)
+
+      assert result =~ "note: in call to `==`, at argument 2"
+      assert result =~ "note: type `Int` was determined by argument 1"
+    end
+  end
 end

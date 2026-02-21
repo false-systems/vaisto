@@ -356,4 +356,55 @@ defmodule Vaisto.TypeCheckerTest do
       assert {:ok, {:fn, [:int], :int}, _} = TypeChecker.check(ast)
     end
   end
+
+  describe "enhanced error messages" do
+    test "call errors include function name" do
+      # Define a function and call it with wrong arg type
+      code = """
+      (defn add [x :int y :int] :int (+ x y))
+      (add 1 "hello")
+      """
+      ast = Vaisto.Parser.parse(code)
+      {:error, errors} = TypeChecker.check(ast)
+      error = if is_list(errors), do: hd(errors), else: errors
+      assert error.note =~ "in call to `add`"
+      assert error.note =~ "at argument 2"
+    end
+
+    test "polymorphic call errors include function name" do
+      # == is {:forall, [0], {:fn, [{:tvar, 0}, {:tvar, 0}], :bool}}
+      code = "(== 1 \"hello\")"
+      ast = Vaisto.Parser.parse(code)
+      {:error, error} = TypeChecker.check(ast)
+      assert error.note =~ "in call to `==`"
+      assert error.note =~ "at argument 2"
+    end
+
+    test "tvar binding origin is explained for polymorphic calls" do
+      code = "(== 1 \"hello\")"
+      ast = Vaisto.Parser.parse(code)
+      {:error, error} = TypeChecker.check(ast)
+      assert error.note =~ "determined by argument 1"
+    end
+
+    test "arity mismatch includes function name" do
+      code = """
+      (defn add [x :int y :int] :int (+ x y))
+      (add 1)
+      """
+      ast = Vaisto.Parser.parse(code)
+      {:error, errors} = TypeChecker.check(ast)
+      error = if is_list(errors), do: hd(errors), else: errors
+      assert error.note =~ "`add`"
+    end
+
+    test "numeric operator error uses TypeFormatter" do
+      code = "(+ 1 :atom)"
+      ast = Vaisto.Parser.parse(code)
+      {:error, error} = TypeChecker.check(ast)
+      # Should use TypeFormatter format (e.g. "Atom(:atom)") not bare inspect
+      assert error.hint =~ "Atom(:atom)"
+      assert error.hint =~ "`+`"
+    end
+  end
 end
