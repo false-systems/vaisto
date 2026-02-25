@@ -119,6 +119,16 @@ defmodule Vaisto.Emitter do
     end)
   end
 
+  # Unary negation → Elixir unary minus
+  def to_elixir({:call, :-, [arg], _type}) do
+    {:-, [], [to_elixir(arg)]}
+  end
+
+  # String concatenation → Elixir <>
+  def to_elixir({:call, :++, [left, right], _type}) do
+    {:<>, [], [to_elixir(left), to_elixir(right)]}
+  end
+
   # Arithmetic calls → Elixir operators
   def to_elixir({:call, op, [left, right], _type}) when op in [:+, :-, :*, :/] do
     {op, [], [to_elixir(left), to_elixir(right)]}

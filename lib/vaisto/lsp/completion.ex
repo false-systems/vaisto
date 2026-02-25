@@ -69,6 +69,13 @@ defmodule Vaisto.LSP.Completion do
     {"div", "Integer division", "(div a b) → int", [:int, :int], :int},
     {"rem", "Integer remainder", "(rem a b) → int", [:int, :int], :int},
 
+    # Short-circuit boolean
+    {"andalso", "Short-circuit and", "(andalso a b) → bool", [:bool, :bool], :bool},
+    {"orelse", "Short-circuit or", "(orelse a b) → bool", [:bool, :bool], :bool},
+
+    # String concatenation
+    {"++", "String concatenation", "(++ a b) → string", [:string, :string], :string},
+
     # List operations
     {"list", "Create a list", "(list a b c) → [a, b, c]", [:any], {:list, :any}},
     {"head", "First element", "(head xs) → element", [{:list, :any}], :any},

@@ -143,6 +143,34 @@ defmodule Vaisto.LSP.SignatureHelp do
       ]
     },
 
+    # Short-circuit boolean
+    "andalso" => %{
+      label: "(andalso a b) → bool",
+      doc: "Short-circuit AND. Evaluates b only if a is true.",
+      params: [
+        %{label: "a", doc: "First boolean"},
+        %{label: "b", doc: "Second boolean (only evaluated if a is true)"}
+      ]
+    },
+    "orelse" => %{
+      label: "(orelse a b) → bool",
+      doc: "Short-circuit OR. Evaluates b only if a is false.",
+      params: [
+        %{label: "a", doc: "First boolean"},
+        %{label: "b", doc: "Second boolean (only evaluated if a is false)"}
+      ]
+    },
+
+    # String concatenation
+    "++" => %{
+      label: "(++ a b) → string",
+      doc: "Concatenates two strings.",
+      params: [
+        %{label: "a", doc: "First string"},
+        %{label: "b", doc: "Second string"}
+      ]
+    },
+
     # List operations
     "list" => %{
       label: "(list elem...) → [elem]",

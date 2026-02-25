@@ -419,6 +419,22 @@ defmodule Vaisto.CoreEmitter do
 
   # Expression transformation that handles state variable
   defp to_core_expr_with_state({:var, :state, _type}, state_var), do: state_var
+  defp to_core_expr_with_state({:call, :-, [arg], _type}, state_var) do
+    :cerl.c_call(
+      :cerl.c_atom(:erlang),
+      :cerl.c_atom(:-),
+      [:cerl.c_int(0), to_core_expr_with_state(arg, state_var)]
+    )
+  end
+  defp to_core_expr_with_state({:call, :++, [left, right], _type}, state_var) do
+    l = to_core_expr_with_state(left, state_var)
+    r = to_core_expr_with_state(right, state_var)
+    :cerl.c_call(
+      :cerl.c_atom(:erlang),
+      :cerl.c_atom(:iolist_to_binary),
+      [:cerl.c_cons(l, :cerl.c_cons(r, :cerl.c_nil()))]
+    )
+  end
   defp to_core_expr_with_state({:call, op, [left, right], _type}, state_var) when op in [:+, :-, :*, :/, :and, :or, :div, :rem] do
     :cerl.c_call(
       :cerl.c_atom(:erlang),
@@ -617,6 +633,26 @@ defmodule Vaisto.CoreEmitter do
     first_expr = to_core_expr(first, user_fns, local_vars)
     rest_expr = to_core_expr({:do, rest, type}, user_fns, local_vars)
     :cerl.c_seq(first_expr, rest_expr)
+  end
+
+  # Unary negation: (- x) → erlang:'-'(0, x)
+  defp to_core_expr({:call, :-, [arg], _type}, user_fns, local_vars) do
+    :cerl.c_call(
+      :cerl.c_atom(:erlang),
+      :cerl.c_atom(:-),
+      [:cerl.c_int(0), to_core_expr(arg, user_fns, local_vars)]
+    )
+  end
+
+  # String concatenation: (++ a b) → erlang:iolist_to_binary([a | [b]])
+  defp to_core_expr({:call, :++, [left, right], _type}, user_fns, local_vars) do
+    l = to_core_expr(left, user_fns, local_vars)
+    r = to_core_expr(right, user_fns, local_vars)
+    :cerl.c_call(
+      :cerl.c_atom(:erlang),
+      :cerl.c_atom(:iolist_to_binary),
+      [:cerl.c_cons(l, :cerl.c_cons(r, :cerl.c_nil()))]
+    )
   end
 
   # Arithmetic and boolean binary: (+ a b), (and a b), (div a b) → erlang:op(a, b)

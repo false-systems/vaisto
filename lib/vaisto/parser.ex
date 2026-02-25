@@ -235,6 +235,11 @@ defmodule Vaisto.Parser do
       # Tuple literal: (tuple :tag a b) → {:tuple, [:tag, a, b], loc}
       # Creates an Erlang tuple at runtime
       [:tuple | elements] -> {:tuple, elements, open_loc}
+      # Short-circuit booleans: desugar to if
+      # (andalso a b) → (if a b false) — evaluates b only when a is true
+      [:andalso, a, b] -> {:if, a, b, false, open_loc}
+      # (orelse a b) → (if a true b) — evaluates b only when a is false
+      [:orelse, a, b] -> {:if, a, true, b, open_loc}
       # Threading macro: (-> x (f a) (g b)) → (g (f x a) b)
       # Compile-time transformation - zero runtime overhead
       [:-> | rest] -> parse_thread_first(rest, open_loc)

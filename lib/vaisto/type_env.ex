@@ -32,6 +32,7 @@ defmodule Vaisto.TypeEnv do
     :not => {:fn, [:bool], :bool},
     :div => {:fn, [:int, :int], :int},
     :rem => {:fn, [:int, :int], :int},
+    :++ => {:fn, [:string, :string], :string},
     :== => {:forall, [0], {:fn, [{:tvar, 0}, {:tvar, 0}], :bool}},
     :< => {:fn, [:int, :int], :bool},
     :> => {:fn, [:int, :int], :bool},

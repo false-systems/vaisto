@@ -644,6 +644,24 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
+  # Unary negation: (- x)
+  defp check_impl_s({:call, :-, [arg]}, ctx) do
+    with {:ok, arg_type, typed_arg, ctx} <- check_s(arg, ctx),
+         :ok <- expect_numeric(arg_type, "negation") do
+      {:ok, arg_type, {:call, :-, [typed_arg], arg_type}, ctx}
+    end
+  end
+
+  # String concatenation: (++ a b)
+  defp check_impl_s({:call, :++, [left, right]}, ctx) do
+    with {:ok, left_type, typed_left, ctx} <- check_s(left, ctx),
+         {:ok, right_type, typed_right, ctx} <- check_s(right, ctx),
+         :ok <- expect_string(left_type, :++),
+         :ok <- expect_string(right_type, :++) do
+      {:ok, :string, {:call, :++, [typed_left, typed_right], :string}, ctx}
+    end
+  end
+
   # Arithmetic operators
   defp check_impl_s({:call, op, [left, right]}, ctx) when op in [:+, :-, :*] do
     with {:ok, left_type, typed_left, ctx} <- check_s(left, ctx),
@@ -2395,6 +2413,11 @@ defmodule Vaisto.TypeChecker do
   defp expect_int(:any, _op), do: :ok
   defp expect_int({:tvar, _}, _op), do: :ok
   defp expect_int(other, op), do: {:error, Errors.type_mismatch(:int, other, hint: "`#{op}` requires integer operands")}
+
+  defp expect_string(:string, _op), do: :ok
+  defp expect_string(:any, _op), do: :ok
+  defp expect_string({:tvar, _}, _op), do: :ok
+  defp expect_string(other, op), do: {:error, Errors.type_mismatch(:string, other, hint: "`#{op}` requires string operands")}
 
   # Determine result type for arithmetic operations
   # int op int → int
