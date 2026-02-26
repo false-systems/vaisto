@@ -37,6 +37,7 @@ defmodule Vaisto.LSP.Completion do
     {"process", "Define a process", "(process name initial-state :msg handler)"},
     {"spawn", "Spawn a process", "(spawn process-name initial-state)"},
     {"extern", "External function binding", "(extern :module :function [:arg-types] :return-type)"},
+    {"for", "List comprehension", "(for [x xs] body)"},
     {"import", "Import a module", "(import Module)"},
     {"ns", "Namespace declaration", "(ns MyModule)"}
   ]
@@ -94,7 +95,10 @@ defmodule Vaisto.LSP.Completion do
     {"!!", "Send message (unchecked)", "(!! pid msg) → msg", [:pid, :any], :any},
 
     # Tuple operations
-    {"tuple", "Create a tuple", "(tuple a b c) → (a, b, c)", [:any], :tuple}
+    {"tuple", "Create a tuple", "(tuple a b c) → (a, b, c)", [:any], :tuple},
+
+    # Threading
+    {"->>", "Thread-last", "(->> x (f a) (g b)) → (g b (f a x))", [:any], :any}
   ]
 
   # ============================================================================

@@ -240,9 +240,14 @@ defmodule Vaisto.Parser do
       [:andalso, a, b] -> {:if, a, b, false, open_loc}
       # (orelse a b) → (if a true b) — evaluates b only when a is false
       [:orelse, a, b] -> {:if, a, true, b, open_loc}
-      # Threading macro: (-> x (f a) (g b)) → (g (f x a) b)
-      # Compile-time transformation - zero runtime overhead
+      # For comprehension: (for [x xs] body) → (map (fn [x] body) xs)
+      # With :when guard: (for [x xs :when pred] body) → (map (fn [x] body) (filter (fn [x] pred) xs))
+      [:for | rest] -> parse_for(rest, open_loc)
+      # Threading macros: compile-time transformation - zero runtime overhead
+      # Thread-first: (-> x (f a) (g b)) → (g (f x a) b)
       [:-> | rest] -> parse_thread_first(rest, open_loc)
+      # Thread-last: (->> x (f a) (g b)) → (g b (f a x))
+      [:"->>" | rest] -> parse_thread_last(rest, open_loc)
       # Field access: (. record :field) → {:field_access, record, :field, loc}
       [:. | rest] -> parse_field_access(rest, open_loc)
       # Regular function call
@@ -530,6 +535,49 @@ defmodule Vaisto.Parser do
     {:error, Errors.parse_error("threading macro requires at least one value: (-> x (f) ...)", span: Error.span_from_loc(loc)), loc}
   end
 
+  # Thread-last: (->> x (f a) (g b)) → (g b (f a x))
+  # Inserts the threaded value as the LAST argument of each form
+  defp parse_thread_last([initial | forms], _loc) when forms != [] do
+    Enum.reduce(forms, initial, fn
+      {:call, func, args, loc}, acc ->
+        {:call, func, args ++ [acc], loc}
+      func, acc when is_atom(func) ->
+        {:call, func, [acc], %Vaisto.Parser.Loc{file: "->>", line: 0, col: 0, length: 0}}
+    end)
+  end
+  defp parse_thread_last([single], _loc), do: single
+  defp parse_thread_last([], loc) do
+    {:error, Errors.parse_error("threading macro requires at least one value: (->> x (f) ...)", span: Error.span_from_loc(loc)), loc}
+  end
+
+  # For comprehension: (for [x xs] body) → (map (fn [x] body) xs)
+  # With :when: (for [x xs :when pred] body) → (map (fn [x] body) (filter (fn [x] pred) xs))
+  defp parse_for([{:bracket, binding} | bodies], loc) when length(bodies) >= 1 do
+    body = wrap_bodies(bodies, loc)
+
+    case binding do
+      # (for [x xs :when pred] body)
+      [var, collection, {:atom, :when}, pred] ->
+        filter_fn = {:fn, [var], pred, loc}
+        filtered = {:call, :filter, [filter_fn, collection], loc}
+        map_fn = {:fn, [var], body, loc}
+        {:call, :map, [map_fn, filtered], loc}
+
+      # (for [x xs] body)
+      [var, collection] ->
+        map_fn = {:fn, [var], body, loc}
+        {:call, :map, [map_fn, collection], loc}
+
+      _ ->
+        {:error, Errors.parse_error("for requires binding [var collection] or [var collection :when pred]", span: Error.span_from_loc(loc)), loc}
+    end
+  end
+  defp parse_for([{:bracket, _binding}], loc) do
+    {:error, Errors.parse_error("for requires a body expression: (for [x xs] body)", span: Error.span_from_loc(loc)), loc}
+  end
+  defp parse_for(_, loc) do
+    {:error, Errors.parse_error("for requires a binding bracket: (for [x xs] body)", span: Error.span_from_loc(loc)), loc}
+  end
 
   # (match expr [pattern1 body1] [pattern2 body2] ...) → {:match, expr, [{pattern, body}, ...], loc}
   # (match expr [pattern body] ...) or (match expr [pattern body1 body2 ...] ...)
@@ -922,15 +970,28 @@ defmodule Vaisto.Parser do
   # Token conversion
   # Takes token string and location, returns parsed value
   # Location is available for future use in error messages
-  defp parse_token(token, _loc) do
+  defp parse_token(token, loc) do
     cond do
       # String literal: "hello" → {:string, "hello"}
+      # With interpolation: "hello #{name}" → {:call, :str, [{:string, "hello "}, name], loc}
       String.starts_with?(token, "\"") ->
-        # Remove surrounding quotes and unescape
-        token
-        |> String.slice(1..-2//1)
-        |> unescape_string()
-        |> then(&{:string, &1})
+        raw = String.slice(token, 1..-2//1)
+        if String.contains?(raw, ~S(#{)) and not only_escaped_interpolations?(raw) do
+          segments = split_interpolation(raw)
+          |> Enum.reject(fn {:text, t} -> t == ""; _ -> false end)
+          |> Enum.map(fn
+            {:text, t} -> {:string, unescape_string(t)}
+            {:expr, e} ->
+              case parse(e) do
+                list when is_list(list) -> {:do, list, loc}
+                single -> single
+              end
+          end)
+
+          {:call, :str, segments, loc}
+        else
+          raw |> unescape_string() |> then(&{:string, &1})
+        end
       token =~ ~r/^0x[0-9a-fA-F]+$/ -> String.to_integer(String.trim_leading(token, "0x"), 16)
       token =~ ~r/^-?\d+$/ -> String.to_integer(token)
       token =~ ~r/^-?\d+\.\d+$/ -> String.to_float(token)
@@ -961,6 +1022,65 @@ defmodule Vaisto.Parser do
         parse_char_literal(token)
       true -> String.to_atom(token)
     end
+  end
+
+  # Check if all #{...} occurrences in a string are escaped (\#{)
+  defp only_escaped_interpolations?(raw) do
+    # Remove all \#{ and see if any #{ remains
+    marker = ~S(#{)
+    raw
+    |> String.replace(~S(\#{), "")
+    |> then(&(not String.contains?(&1, marker)))
+  end
+
+  # Split string content on #{...} interpolation markers.
+  # Returns [{:text, "hello "}, {:expr, "name"}, {:text, "!"}]
+  # Handles nested braces and escaped \#{
+  defp split_interpolation(raw) do
+    raw
+    |> String.graphemes()
+    |> do_split_interpolation(:text, [], [], 0)
+  end
+
+  defp do_split_interpolation([], :text, acc, segments, _depth) do
+    text = acc |> Enum.reverse() |> Enum.join()
+    Enum.reverse([{:text, text} | segments])
+  end
+
+  defp do_split_interpolation([], :expr, _acc, _segments, _depth) do
+    raise "Unterminated string interpolation"
+  end
+
+  # Escaped interpolation: \#{ → literal text
+  defp do_split_interpolation(["\\", "#", "{" | rest], :text, acc, segments, depth) do
+    do_split_interpolation(rest, :text, ["{", "#", "\\" | acc], segments, depth)
+  end
+
+  # Start interpolation: #{
+  defp do_split_interpolation(["#", "{" | rest], :text, acc, segments, _depth) do
+    text = acc |> Enum.reverse() |> Enum.join()
+    do_split_interpolation(rest, :expr, [], [{:text, text} | segments], 0)
+  end
+
+  # Nested brace inside interpolation
+  defp do_split_interpolation(["{" | rest], :expr, acc, segments, depth) do
+    do_split_interpolation(rest, :expr, ["{" | acc], segments, depth + 1)
+  end
+
+  # Closing brace at depth 0 → end interpolation
+  defp do_split_interpolation(["}" | rest], :expr, acc, segments, 0) do
+    expr = acc |> Enum.reverse() |> Enum.join()
+    do_split_interpolation(rest, :text, [], [{:expr, expr} | segments], 0)
+  end
+
+  # Closing brace at depth > 0 → nested brace
+  defp do_split_interpolation(["}" | rest], :expr, acc, segments, depth) do
+    do_split_interpolation(rest, :expr, ["}" | acc], segments, depth - 1)
+  end
+
+  # Regular char
+  defp do_split_interpolation([c | rest], mode, acc, segments, depth) do
+    do_split_interpolation(rest, mode, [c | acc], segments, depth)
   end
 
   # Handle common escape sequences in strings

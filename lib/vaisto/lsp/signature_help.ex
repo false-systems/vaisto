@@ -327,6 +327,26 @@ defmodule Vaisto.LSP.SignatureHelp do
       params: [
         %{label: "elem...", doc: "Elements for the tuple"}
       ]
+    },
+
+    # For comprehension
+    "for" => %{
+      label: "(for [x xs] body) → [b]",
+      doc: "List comprehension. Maps a function over a list, optionally filtering with :when.",
+      params: [
+        %{label: "[x xs]", doc: "Binding: variable and source list. Optional :when predicate."},
+        %{label: "body", doc: "Expression to evaluate for each element"}
+      ]
+    },
+
+    # Thread-last
+    "->>" => %{
+      label: "(->> val (f a) (g b)) → result",
+      doc: "Thread-last macro. Inserts the previous result as the last argument of each form.",
+      params: [
+        %{label: "val", doc: "Initial value to thread"},
+        %{label: "(f a)...", doc: "Forms to thread through (value inserted as last arg)"}
+      ]
     }
   }
 
