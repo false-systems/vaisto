@@ -551,25 +551,21 @@ defmodule Vaisto.Parser do
   end
 
   # For comprehension: (for [x xs] body) → (map (fn [x] body) xs)
-  # With :when: (for [x xs :when pred] body) → (map (fn [x] body) (filter (fn [x] pred) xs))
+  # Multi-binding: (for [x xs y ys] body) → (flat_map (fn [x] (map (fn [y] body) ys)) xs)
+  # With :when: filter applies to innermost binding only
   defp parse_for([{:bracket, binding} | bodies], loc) when length(bodies) >= 1 do
     body = wrap_bodies(bodies, loc)
+    {pairs, when_pred} = split_for_bindings_at_when(binding)
 
-    case binding do
-      # (for [x xs :when pred] body)
-      [var, collection, {:atom, :when}, pred] ->
-        filter_fn = {:fn, [var], pred, loc}
-        filtered = {:call, :filter, [filter_fn, collection], loc}
-        map_fn = {:fn, [var], body, loc}
-        {:call, :map, [map_fn, filtered], loc}
+    cond do
+      pairs == :error ->
+        {:error, Errors.parse_error("for requires even number of binding elements [var collection ...]", span: Error.span_from_loc(loc)), loc}
 
-      # (for [x xs] body)
-      [var, collection] ->
-        map_fn = {:fn, [var], body, loc}
-        {:call, :map, [map_fn, collection], loc}
+      pairs == [] ->
+        {:error, Errors.parse_error("for requires at least one binding [var collection]", span: Error.span_from_loc(loc)), loc}
 
-      _ ->
-        {:error, Errors.parse_error("for requires binding [var collection] or [var collection :when pred]", span: Error.span_from_loc(loc)), loc}
+      true ->
+        desugar_for_pairs(pairs, when_pred, body, loc)
     end
   end
   defp parse_for([{:bracket, _binding}], loc) do
@@ -577,6 +573,52 @@ defmodule Vaisto.Parser do
   end
   defp parse_for(_, loc) do
     {:error, Errors.parse_error("for requires a binding bracket: (for [x xs] body)", span: Error.span_from_loc(loc)), loc}
+  end
+
+  # Split binding tokens into {var, collection} pairs and optional :when predicate
+  defp split_for_bindings_at_when(tokens) do
+    {before_when, after_when} = Enum.split_while(tokens, fn
+      {:atom, :when} -> false
+      _ -> true
+    end)
+
+    when_pred = case after_when do
+      [{:atom, :when}, pred] -> pred
+      [] -> nil
+      _ -> :error
+    end
+
+    if when_pred == :error do
+      {:error, nil}
+    else
+      if rem(length(before_when), 2) != 0 do
+        {:error, nil}
+      else
+        pairs = before_when |> Enum.chunk_every(2) |> Enum.map(fn [v, c] -> {v, c} end)
+        {pairs, when_pred}
+      end
+    end
+  end
+
+  # Desugar binding pairs into nested flat_map/map calls
+  # Single binding (innermost): use map (+ optional filter for :when)
+  # Multiple bindings: outer uses flat_map, recurse for inner
+  defp desugar_for_pairs([{var, collection}], when_pred, body, loc) do
+    if when_pred do
+      filter_fn = {:fn, [var], when_pred, loc}
+      filtered = {:call, :filter, [filter_fn, collection], loc}
+      map_fn = {:fn, [var], body, loc}
+      {:call, :map, [map_fn, filtered], loc}
+    else
+      map_fn = {:fn, [var], body, loc}
+      {:call, :map, [map_fn, collection], loc}
+    end
+  end
+
+  defp desugar_for_pairs([{var, collection} | rest], when_pred, body, loc) do
+    inner = desugar_for_pairs(rest, when_pred, body, loc)
+    flat_map_fn = {:fn, [var], inner, loc}
+    {:call, :flat_map, [flat_map_fn, collection], loc}
   end
 
   # (match expr [pattern1 body1] [pattern2 body2] ...) → {:match, expr, [{pattern, body}, ...], loc}
@@ -689,35 +731,36 @@ defmodule Vaisto.Parser do
   # Helper for single-clause defn to avoid pattern match conflicts
   # (defn name [params] :ret_type body) or (defn name [params] :ret_type body1 body2 ...)
   # (defn name [params] body) or (defn name [params] body1 body2 ...)
+  # (defn name [params :when guard] :ret_type body) — guarded variant
   defp parse_defn_single(name, [{:bracket, params} | rest], loc) when length(rest) >= 1 do
-    typed_params = parse_typed_params(params)
+    {param_tokens, guard} = split_params_at_when(params)
+    typed_params = parse_typed_params(param_tokens)
 
     case rest do
       # Single element is always the body - even if it looks like a type
       # This allows (defn foo [] :int) to return the keyword :int
       [single_body] ->
-        {:defn, name, typed_params, single_body, :any, loc}
+        make_defn(name, typed_params, single_body, :any, guard, loc)
 
       # Type annotation followed by body: (defn name [params] :type body ...)
       [{:atom, type_atom} | bodies] when length(bodies) >= 1 ->
         if is_type_annotation?({:atom, type_atom}) do
           body = wrap_bodies(bodies, loc)
-          {:defn, name, typed_params, body, unwrap_type({:atom, type_atom}), loc}
+          make_defn(name, typed_params, body, unwrap_type({:atom, type_atom}), guard, loc)
         else
           # :keyword treated as body
           body = wrap_bodies(rest, loc)
-          {:defn, name, typed_params, body, :any, loc}
+          make_defn(name, typed_params, body, :any, guard, loc)
         end
 
       # Multiple body expressions (no type annotation): (defn name [params] body1 body2 ...)
       _ ->
         body = wrap_bodies(rest, loc)
-        {:defn, name, typed_params, body, :any, loc}
+        make_defn(name, typed_params, body, :any, guard, loc)
     end
   end
 
   defp parse_defn_single(_name, [{:bracket, _params}], loc) do
-    # No body - error
     {:error, Errors.parse_error("defn requires a body expression", span: Error.span_from_loc(loc)), loc}
   end
 
@@ -725,14 +768,42 @@ defmodule Vaisto.Parser do
     {:error, Errors.parse_error("Invalid defn syntax", span: Error.span_from_loc(loc)), loc}
   end
 
+  defp make_defn(name, params, body, ret_type, nil, loc) do
+    {:defn, name, params, body, ret_type, loc}
+  end
+  defp make_defn(name, params, body, ret_type, guard, loc) do
+    {:defn, name, params, body, ret_type, guard, loc}
+  end
+
+  # Split params tokens at :when — returns {param_tokens, guard_ast | nil}
+  defp split_params_at_when(tokens) do
+    {before_when, after_when} = Enum.split_while(tokens, fn
+      {:atom, :when} -> false
+      _ -> true
+    end)
+
+    case after_when do
+      [{:atom, :when}, guard] -> {before_when, guard}
+      [] -> {tokens, nil}
+      _ -> {tokens, nil}
+    end
+  end
+
   # Wrap multiple body expressions in a do block
   defp wrap_bodies([single], _loc), do: single
   defp wrap_bodies(multiple, loc), do: {:do, multiple, loc}
 
-  # Extract pattern and body from a clause
-  # Clause content is [pattern, body] where pattern is already normalized
-  # [] → empty list, {:cons, h, t} → cons pattern, etc.
-  defp extract_pattern_body([pattern, body]), do: {pattern, body}
+  # Extract pattern, optional guard, and body from a clause
+  # Clause content is [pattern, body] or [pattern, :when, guard, body...]
+  defp extract_pattern_body([pattern, {:atom, :when}, guard | bodies]) when bodies != [] do
+    body = wrap_bodies(bodies, %Vaisto.Parser.Loc{file: "defn_multi", line: 0, col: 0, length: 0})
+    {pattern, guard, body}
+  end
+  defp extract_pattern_body([pattern, body]), do: {pattern, nil, body}
+  defp extract_pattern_body([pattern | bodies]) when length(bodies) > 1 do
+    body = wrap_bodies(bodies, %Vaisto.Parser.Loc{file: "defn_multi", line: 0, col: 0, length: 0})
+    {pattern, nil, body}
+  end
 
   # Check if params list looks like typed pairs (alternating names and types)
   # Types come from tokenizer as {:atom, :int} wrapped form

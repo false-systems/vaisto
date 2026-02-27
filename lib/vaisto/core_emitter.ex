@@ -244,6 +244,7 @@ defmodule Vaisto.CoreEmitter do
     user_fns = defns
       |> Enum.flat_map(fn
         {:defn, name, params, _, _} -> [{name, length(params)}]
+        {:defn, name, params, _, _, _guard} -> [{name, length(params)}]
         {:defn_multi, name, arity, _clauses, _type} -> [{name, arity}]
         {:defval, name, _, _} -> [{name, 0}]
         _ -> []
@@ -252,6 +253,20 @@ defmodule Vaisto.CoreEmitter do
 
     # Build function definitions
     fun_defs = Enum.map(defns, fn
+      {:defn, name, params, body, _type, typed_guard} ->
+        param_vars = Enum.map(params, &:cerl.c_var/1)
+        local_vars = MapSet.new(params)
+        body_core = to_core_expr(body, user_fns, local_vars)
+        guard_core = to_core_expr(typed_guard, user_fns, local_vars)
+        # case guard of true -> body; _ -> erlang:error(function_clause) end
+        true_clause = :cerl.c_clause([:cerl.c_atom(true)], body_core)
+        fail_clause = :cerl.c_clause([:cerl.c_var(:_)],
+          :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:error), [:cerl.c_atom(:function_clause)]))
+        guarded_body = :cerl.c_case(guard_core, [true_clause, fail_clause])
+        fun = :cerl.c_fun(param_vars, guarded_body)
+        fname = :cerl.c_fname(name, length(params))
+        {fname, fun}
+
       {:defn, name, params, body, _type} ->
         param_vars = Enum.map(params, &:cerl.c_var/1)
         # Track parameters as local variables so they can be called as functions
@@ -267,14 +282,18 @@ defmodule Vaisto.CoreEmitter do
         arg_var = :cerl.c_var(:__arg__)
         param_vars = [arg_var]
 
-        # Build case clauses from patterns
-        # Note: pattern variables are bound within each clause
-        case_clauses = Enum.map(clauses, fn {pattern, body, _body_type} ->
+        # Build case clauses from patterns (4-tuple: {pattern, guard, body, type})
+        case_clauses = Enum.map(clauses, fn {pattern, guard, body, _body_type} ->
           pattern_core = to_core_multi_pattern(pattern)
           pattern_vars = Shared.extract_pattern_vars(pattern)
           local_vars = MapSet.new(pattern_vars)
           body_core = to_core_expr(body, user_fns, local_vars)
-          :cerl.c_clause([pattern_core], :cerl.c_atom(true), body_core)
+          guard_core = if guard do
+            to_core_expr(guard, user_fns, local_vars)
+          else
+            :cerl.c_atom(true)
+          end
+          :cerl.c_clause([pattern_core], guard_core, body_core)
         end)
 
         fun_body = :cerl.c_case(arg_var, case_clauses)
@@ -955,6 +974,31 @@ defmodule Vaisto.CoreEmitter do
     )
   end
 
+  # flat_map: lists:flatmap/2 with named function
+  defp to_core_expr({:call, :flat_map, [func_name, list_expr], _type}, user_fns, local_vars) when is_atom(func_name) do
+    list_core = to_core_expr(list_expr, user_fns, local_vars)
+    func_ref = :cerl.c_fname(func_name, 1)
+    x_var = :cerl.c_var(:__flatmap_x__)
+    fun_body = :cerl.c_apply(func_ref, [x_var])
+    flatmap_fun = :cerl.c_fun([x_var], fun_body)
+    :cerl.c_call(
+      :cerl.c_atom(:lists),
+      :cerl.c_atom(:flatmap),
+      [flatmap_fun, list_core]
+    )
+  end
+
+  # flat_map with anonymous function
+  defp to_core_expr({:call, :flat_map, [{:fn, _, _, _} = fn_ast, list_expr], _type}, user_fns, local_vars) do
+    list_core = to_core_expr(list_expr, user_fns, local_vars)
+    fn_core = to_core_expr(fn_ast, user_fns, local_vars)
+    :cerl.c_call(
+      :cerl.c_atom(:lists),
+      :cerl.c_atom(:flatmap),
+      [fn_core, list_core]
+    )
+  end
+
   # Arithmetic/comparison operators that are BIFs, not user functions
   @bif_operators [:+, :-, :*, :/, :==, :!=, :<, :>, :<=, :>=, :and, :or, :not, :div, :rem]
 
@@ -1167,6 +1211,14 @@ defmodule Vaisto.CoreEmitter do
 
   # Tuple pattern destructuring - use case expression
   defp emit_let_binding({{:tuple_pattern, _, _} = pattern, expr, _type}, body, user_fns, local_vars) do
+    value = to_core_expr(expr, user_fns, local_vars)
+    core_pattern = to_core_pattern(pattern)
+    clause = :cerl.c_clause([core_pattern], body)
+    :cerl.c_case(value, [clause])
+  end
+
+  # Constructor/record pattern destructuring: (let [(Ok v) expr] ...)
+  defp emit_let_binding({{:pattern, _, _, _} = pattern, expr, _type}, body, user_fns, local_vars) do
     value = to_core_expr(expr, user_fns, local_vars)
     core_pattern = to_core_pattern(pattern)
     clause = :cerl.c_clause([core_pattern], body)

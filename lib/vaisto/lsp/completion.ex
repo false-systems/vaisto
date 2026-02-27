@@ -86,6 +86,7 @@ defmodule Vaisto.LSP.Completion do
     {"map", "Map function over list", "(map f xs) → list", [{:fn, [:any], :any}, {:list, :any}], {:list, :any}},
     {"filter", "Filter list", "(filter f xs) → list", [{:fn, [:any], :bool}, {:list, :any}], {:list, :any}},
     {"fold", "Fold/reduce list", "(fold f init xs) → value", [{:fn, [:any, :any], :any}, :any, {:list, :any}], :any},
+    {"flat_map", "Flat map over list", "(flat_map f xs) → list", [{:fn, [:any], {:list, :any}}, {:list, :any}], {:list, :any}},
 
     # String operations
     {"str", "String concatenation/conversion", "(str a b c) → string", [:any], :string},

@@ -109,13 +109,38 @@ defmodule Vaisto.Emitter do
     body_ast = to_elixir(body)
 
     # Build assignments from innermost to outermost
-    List.foldr(bindings, body_ast, fn {name, expr, _type}, acc ->
-      var = Macro.var(name, nil)
-      value = to_elixir(expr)
-      quote do
-        unquote(var) = unquote(value)
-        unquote(acc)
-      end
+    List.foldr(bindings, body_ast, fn
+      {name, expr, _type}, acc when is_atom(name) ->
+        var = Macro.var(name, nil)
+        value = to_elixir(expr)
+        quote do
+          unquote(var) = unquote(value)
+          unquote(acc)
+        end
+
+      {{:pattern, _, _, _} = pattern, expr, _type}, acc ->
+        pattern_ast = emit_pattern(pattern)
+        value = to_elixir(expr)
+        quote do
+          unquote(pattern_ast) = unquote(value)
+          unquote(acc)
+        end
+
+      {{:tuple_pattern, _, _} = pattern, expr, _type}, acc ->
+        pattern_ast = emit_pattern(pattern)
+        value = to_elixir(expr)
+        quote do
+          unquote(pattern_ast) = unquote(value)
+          unquote(acc)
+        end
+
+      {{:cons_pattern, _, _, _} = pattern, expr, _type}, acc ->
+        pattern_ast = emit_pattern(pattern)
+        value = to_elixir(expr)
+        quote do
+          unquote(pattern_ast) = unquote(value)
+          unquote(acc)
+        end
     end)
   end
 
@@ -241,6 +266,25 @@ defmodule Vaisto.Emitter do
     end
   end
 
+  # flat_map: apply function to each element and flatten (named function)
+  def to_elixir({:call, :flat_map, [func_name, list_expr], _type}) when is_atom(func_name) do
+    list_ast = to_elixir(list_expr)
+    x_var = Macro.var(:vaisto_flatmap_x, nil)
+    call_ast = {func_name, [], [x_var]}
+    quote do
+      Enum.flat_map(unquote(list_ast), fn unquote(x_var) -> unquote(call_ast) end)
+    end
+  end
+
+  # flat_map with anonymous function
+  def to_elixir({:call, :flat_map, [{:fn, _, _, _} = fn_ast, list_expr], _type}) do
+    list_ast = to_elixir(list_expr)
+    fn_elixir = to_elixir(fn_ast)
+    quote do
+      Enum.flat_map(unquote(list_ast), unquote(fn_elixir))
+    end
+  end
+
   # fold: left fold with accumulator (named function)
   def to_elixir({:call, :fold, [func_name, init_expr, list_expr], _type}) when is_atom(func_name) do
     init_ast = to_elixir(init_expr)
@@ -341,23 +385,43 @@ defmodule Vaisto.Emitter do
     end
   end
 
-  # Multi-clause function definition → multiple Elixir def clauses
-  # (defn len [[] 0] [[h | t] (+ 1 (len t))]) → def len([]), do: 0; def len([h | t]), do: 1 + len(t)
-  # Note: typed AST has arity inserted: {:defn_multi, name, arity, clauses, type}
-  def to_elixir({:defn_multi, name, _arity, clauses, _type}) do
-    # Generate multiple def clauses, one per pattern
-    clause_defs = Enum.map(clauses, fn {pattern, body, _body_type} ->
-      pattern_ast = emit_fn_pattern(pattern)
-      body_ast = to_elixir(body)
+  # Guarded defn: (defn name [params :when guard] body)
+  def to_elixir({:defn, name, params, body, _type, typed_guard}) do
+    param_vars = Enum.map(params, &Macro.var(&1, nil))
+    body_ast = to_elixir(body)
+    guard_ast = to_elixir(typed_guard)
 
-      quote do
-        def unquote(name)(unquote(pattern_ast)) do
-          unquote(body_ast)
-        end
+    quote do
+      def unquote(name)(unquote_splicing(param_vars)) when unquote(guard_ast) do
+        unquote(body_ast)
       end
+    end
+  end
+
+  # Multi-clause function definition → multiple Elixir def clauses
+  # Clauses are now 4-tuples: {pattern, guard_or_nil, body, body_type}
+  def to_elixir({:defn_multi, name, _arity, clauses, _type}) do
+    clause_defs = Enum.map(clauses, fn
+      {pattern, nil, body, _body_type} ->
+        pattern_ast = emit_fn_pattern(pattern)
+        body_ast = to_elixir(body)
+        quote do
+          def unquote(name)(unquote(pattern_ast)) do
+            unquote(body_ast)
+          end
+        end
+
+      {pattern, guard, body, _body_type} ->
+        pattern_ast = emit_fn_pattern(pattern)
+        body_ast = to_elixir(body)
+        guard_ast = to_elixir(guard)
+        quote do
+          def unquote(name)(unquote(pattern_ast)) when unquote(guard_ast) do
+            unquote(body_ast)
+          end
+        end
     end)
 
-    # Return a block of all defs
     {:__block__, [], clause_defs}
   end
 
@@ -461,6 +525,33 @@ defmodule Vaisto.Emitter do
       end
     after
       Process.delete(:vaisto_compile_context)
+    end
+  end
+
+  # Single guarded defn compilation
+  def compile({:defn, name, _params, _body, _type, _guard} = defn_ast, module_name) do
+    elixir_ast = to_elixir(defn_ast)
+
+    module_ast = if name == :main do
+      quote do
+        defmodule unquote(module_name) do
+          unquote(elixir_ast)
+        end
+      end
+    else
+      quote do
+        defmodule unquote(module_name) do
+          unquote(elixir_ast)
+          def main, do: unquote(name)()
+        end
+      end
+    end
+
+    try do
+      [{^module_name, bytecode}] = Code.compile_quoted(module_ast)
+      {:ok, module_name, bytecode}
+    rescue
+      e -> {:error, Errors.compilation_error(Exception.message(e))}
     end
   end
 

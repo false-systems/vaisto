@@ -233,6 +233,14 @@ defmodule Vaisto.LSP.SignatureHelp do
         %{label: "xs", doc: "List to fold over"}
       ]
     },
+    "flat_map" => %{
+      label: "(flat_map fn xs) → [b]",
+      doc: "Applies fn to each element of xs, where fn returns a list, and flattens the results.",
+      params: [
+        %{label: "fn", doc: "Function (a → [b]) to apply"},
+        %{label: "xs", doc: "List of elements"}
+      ]
+    },
 
     # String
     "str" => %{
@@ -331,11 +339,11 @@ defmodule Vaisto.LSP.SignatureHelp do
 
     # For comprehension
     "for" => %{
-      label: "(for [x xs] body) → [b]",
-      doc: "List comprehension. Maps a function over a list, optionally filtering with :when.",
+      label: "(for [x xs ...] body) → [b]",
+      doc: "List comprehension. Supports multiple bindings and optional :when filter.",
       params: [
-        %{label: "[x xs]", doc: "Binding: variable and source list. Optional :when predicate."},
-        %{label: "body", doc: "Expression to evaluate for each element"}
+        %{label: "[x xs ...]", doc: "Bindings: var collection pairs. Optional :when predicate for innermost."},
+        %{label: "body", doc: "Expression to evaluate for each combination"}
       ]
     },
 
