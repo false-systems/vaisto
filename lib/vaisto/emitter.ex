@@ -155,8 +155,18 @@ defmodule Vaisto.Emitter do
   end
 
   # Arithmetic calls → Elixir operators
-  def to_elixir({:call, op, [left, right], _type}) when op in [:+, :-, :*, :/] do
+  def to_elixir({:call, op, [left, right], _type}) when op in [:+, :-, :*, :/, :div, :rem] do
     {op, [], [to_elixir(left), to_elixir(right)]}
+  end
+
+  # Boolean binary operators
+  def to_elixir({:call, op, [left, right], _type}) when op in [:and, :or] do
+    {op, [], [to_elixir(left), to_elixir(right)]}
+  end
+
+  # Boolean unary not
+  def to_elixir({:call, :not, [arg], _type}) do
+    {:not, [], [to_elixir(arg)]}
   end
 
   # Comparison calls

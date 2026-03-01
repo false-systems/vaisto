@@ -8,6 +8,13 @@ defmodule Vaisto.LSP.Hover do
 
   alias Vaisto.Parser
   alias Vaisto.TypeChecker
+
+  # Safe atom conversion — avoids exhausting the atom table in a long-running LSP
+  defp safe_to_atom(str) do
+    String.to_existing_atom(str)
+  rescue
+    ArgumentError -> nil
+  end
   alias Vaisto.Error
   alias Vaisto.LSP.ASTAnalyzer
 
@@ -233,7 +240,7 @@ defmodule Vaisto.LSP.Hover do
 
       # Atom/keyword
       String.starts_with?(token, ":") ->
-        atom = token |> String.trim_leading(":") |> String.to_atom()
+        atom = token |> String.trim_leading(":") |> String.to_existing_atom()
         {:ok, {:atom, atom}}
 
       # Boolean
@@ -247,13 +254,15 @@ defmodule Vaisto.LSP.Hover do
 
   # Find the definition location for a symbol in the source
   defp find_definition_loc(source, token, file) do
-    token_atom = String.to_atom(token)
-
-    try do
-      ast = Parser.parse(source, file: file)
-      ASTAnalyzer.find_definition_at(ast, token_atom)
-    rescue
-      _ -> :not_found
+    case safe_to_atom(token) do
+      nil -> :not_found
+      token_atom ->
+        try do
+          ast = Parser.parse(source, file: file)
+          ASTAnalyzer.find_definition_at(ast, token_atom)
+        rescue
+          _ -> :not_found
+        end
     end
   end
 
@@ -264,7 +273,7 @@ defmodule Vaisto.LSP.Hover do
       ast = Parser.parse(source, file: file)
       case TypeChecker.check(ast) do
         {:ok, _type, typed_ast} ->
-          token_atom = String.to_atom(token)
+          token_atom = safe_to_atom(token)
 
           # First, search the typed AST for variable references with this name
           # This finds local variables in let bindings, function params, etc.
@@ -290,7 +299,7 @@ defmodule Vaisto.LSP.Hover do
 
         {:error, _} ->
           # Type check failed, try primitives only
-          token_atom = String.to_atom(token)
+          token_atom = safe_to_atom(token)
           case Map.get(TypeChecker.primitives(), token_atom) do
             nil -> :not_found
             type -> {:ok, type, :builtin}

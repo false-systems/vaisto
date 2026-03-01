@@ -939,62 +939,59 @@ defmodule Vaisto.TypeChecker do
       {p, b} -> {p, nil, b}
     end)
 
-    first_pattern = elem(hd(clauses), 0)
-    arity = case first_pattern do
-      [] -> 1
-      {:cons, _, _} -> 1
-      {:list, _} -> 1
-      {:call, _, args} -> length(args)
-      _ -> 1
-    end
+    # Multi-clause functions always take exactly 1 argument —
+    # each clause has one pattern matching one arg.
+    # (Constructor field count != param count: (Point x y) is 1 arg, not 2)
+    arity = 1
 
     param_types = infer_multi_clause_param_types(clauses, arity)
     self_type = {:fn, param_types, :any}
     extended_ctx = %{ctx | env: Map.put(ctx.env, name, self_type)}
 
-    typed_clauses_result = Enum.reduce(clauses, {:ok, [], [], extended_ctx}, fn
-      {pattern, guard, body}, {:ok, typed_acc, error_acc, ctx} ->
+    typed_clauses_result = Enum.reduce(clauses, {:ok, [], []}, fn
+      {pattern, guard, body}, {:ok, typed_acc, error_acc} ->
+        # Each clause starts from extended_ctx — no leakage from previous clauses
         bindings = extract_multi_pattern_bindings(pattern)
-        clause_ctx = %{ctx | env: Enum.reduce(bindings, ctx.env, fn {var, type}, e ->
+        clause_ctx = %{extended_ctx | env: Enum.reduce(bindings, extended_ctx.env, fn {var, type}, e ->
           Map.put(e, var, type)
         end)}
 
         # Check guard if present
         guard_result = if guard do
           case check_s(guard, clause_ctx) do
-            {:ok, guard_type, typed_guard, ctx} ->
+            {:ok, guard_type, typed_guard, _ctx} ->
               case expect_bool(guard_type) do
-                :ok -> {:ok, typed_guard, ctx}
+                :ok -> {:ok, typed_guard}
                 {:error, _} = err -> err
               end
             error -> error
           end
         else
-          {:ok, nil, clause_ctx}
+          {:ok, nil}
         end
 
         case guard_result do
-          {:ok, typed_guard, ctx} ->
-            case check_s(body, ctx) do
-              {:ok, body_type, typed_body, ctx} ->
-                typed_pattern = type_multi_pattern(pattern, ctx.env)
-                {:ok, [{typed_pattern, typed_guard, typed_body, body_type} | typed_acc], error_acc, ctx}
+          {:ok, typed_guard} ->
+            case check_s(body, clause_ctx) do
+              {:ok, body_type, typed_body, _ctx} ->
+                typed_pattern = type_multi_pattern(pattern, extended_ctx.env)
+                {:ok, [{typed_pattern, typed_guard, typed_body, body_type} | typed_acc], error_acc}
               {:error, err} ->
-                {:ok, typed_acc, [err | error_acc], ctx}
+                {:ok, typed_acc, [err | error_acc]}
             end
-          {:error, err} -> {:ok, typed_acc, [err | error_acc], ctx}
+          {:error, err} -> {:ok, typed_acc, [err | error_acc]}
         end
     end)
 
     case typed_clauses_result do
-      {:ok, typed_clauses, [], ctx} ->
+      {:ok, typed_clauses, []} ->
         ret_types = Enum.map(typed_clauses, fn {_, _, _, ret_type} -> ret_type end)
         unified_ret_type = join_types_list(ret_types)
         func_type = {:fn, param_types, unified_ret_type}
-        {:ok, func_type, {:defn_multi, name, arity, Enum.reverse(typed_clauses), func_type}, ctx}
-      {:ok, _, [single_error], _} ->
+        {:ok, func_type, {:defn_multi, name, arity, Enum.reverse(typed_clauses), func_type}, extended_ctx}
+      {:ok, _, [single_error]} ->
         {:error, single_error}
-      {:ok, _, errors, _} ->
+      {:ok, _, errors} ->
         {:error, Enum.reverse(errors)}
     end
   end
@@ -2180,6 +2177,7 @@ defmodule Vaisto.TypeChecker do
   defp type_multi_pattern(var, _env) when is_atom(var) and var not in [:_, true, false] do
     {:var, var, :any}
   end
+  defp type_multi_pattern(:_, _env), do: :_
   defp type_multi_pattern(lit, _env) when is_integer(lit), do: {:lit, :int, lit}
   defp type_multi_pattern(lit, _env) when is_atom(lit), do: {:lit, :atom, lit}
 
@@ -2914,22 +2912,10 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
-  defp collect_defn_multi_signature(name, clauses, env) do
-    # Determine arity from first clause (supports both 2-tuple and 3-tuple clauses)
-    first_pattern = case hd(clauses) do
-      {p, _, _} -> p
-      {p, _} -> p
-    end
-    arity = case first_pattern do
-      {:list, elems} -> length(elems)
-      {:list, elems, _loc} -> length(elems)
-      {:call, _, args} -> length(args)
-      {:call, _, args, _loc} -> length(args)
-      _ when is_list(first_pattern) -> length(first_pattern)
-      _ -> 1
-    end
-    param_types = List.duplicate(:any, arity)
-    func_type = {:fn, param_types, :any}
+  defp collect_defn_multi_signature(name, _clauses, env) do
+    # Multi-clause functions always take exactly 1 argument —
+    # each clause has one pattern matching one arg.
+    func_type = {:fn, [:any], :any}
     Map.put(env, name, func_type)
   end
 

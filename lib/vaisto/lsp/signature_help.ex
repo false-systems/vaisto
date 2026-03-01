@@ -498,7 +498,12 @@ defmodule Vaisto.LSP.SignatureHelp do
   defp get_user_signature(func_name, text) do
     try do
       ast = Parser.parse(text)
-      func_atom = String.to_atom(func_name)
+      func_atom = try do
+        String.to_existing_atom(func_name)
+      rescue
+        ArgumentError -> nil
+      end
+      if is_nil(func_atom), do: throw(:not_found)
 
       # Use ASTAnalyzer to find the function definition
       case ASTAnalyzer.find_definition_at(ast, func_atom) do
@@ -513,6 +518,8 @@ defmodule Vaisto.LSP.SignatureHelp do
           end
         :not_found -> nil
       end
+    catch
+      :not_found -> nil
     rescue
       _ -> nil
     end

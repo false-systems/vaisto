@@ -516,16 +516,22 @@ defmodule Vaisto.Parser do
   #   (-> x (f a))     → (f x a)
   #   (-> x (f a) (g)) → (g (f x a))
   #   (-> x f)         → (f x)  ; bare symbol becomes a call
-  defp parse_thread_first([initial | forms], _loc) when forms != [] do
+  defp parse_thread_first([initial | forms], loc) when forms != [] do
     Enum.reduce(forms, initial, fn
       # Case 1: (f arg1 arg2) - function call with args, insert initial as first arg
-      {:call, func, args, loc}, acc ->
-        {:call, func, [acc | args], loc}
+      {:call, func, args, call_loc}, acc ->
+        {:call, func, [acc | args], call_loc}
 
       # Case 2: Bare atom 'f' - convert to (f acc)
       func, acc when is_atom(func) ->
         {:call, func, [acc], %Vaisto.Parser.Loc{file: "->", line: 0, col: 0, length: 0}}
+
+      # Case 3: Invalid form (literal, string, etc.)
+      other, _acc ->
+        throw({:parse_error, Errors.parse_error("threading form must be a function call or name, got: #{inspect(other)}", span: Error.span_from_loc(loc))})
     end)
+  catch
+    {:parse_error, err} -> {:error, err, loc}
   end
   defp parse_thread_first([single], _loc) do
     # (-> x) with no forms just returns x
@@ -537,13 +543,17 @@ defmodule Vaisto.Parser do
 
   # Thread-last: (->> x (f a) (g b)) → (g b (f a x))
   # Inserts the threaded value as the LAST argument of each form
-  defp parse_thread_last([initial | forms], _loc) when forms != [] do
+  defp parse_thread_last([initial | forms], loc) when forms != [] do
     Enum.reduce(forms, initial, fn
-      {:call, func, args, loc}, acc ->
-        {:call, func, args ++ [acc], loc}
+      {:call, func, args, call_loc}, acc ->
+        {:call, func, args ++ [acc], call_loc}
       func, acc when is_atom(func) ->
         {:call, func, [acc], %Vaisto.Parser.Loc{file: "->>", line: 0, col: 0, length: 0}}
+      other, _acc ->
+        throw({:parse_error, Errors.parse_error("threading form must be a function call or name, got: #{inspect(other)}", span: Error.span_from_loc(loc))})
     end)
+  catch
+    {:parse_error, err} -> {:error, err, loc}
   end
   defp parse_thread_last([single], _loc), do: single
   defp parse_thread_last([], loc) do
@@ -709,7 +719,7 @@ defmodule Vaisto.Parser do
   #   [[h | t] (+ 1 (len t))])
   # All clauses are brackets: [pattern body]
   # This clause only matches when ALL remaining elements are brackets (multi-clause style)
-  defp parse_defn([name | clauses], loc) when is_list(clauses) and length(clauses) >= 2 do
+  defp parse_defn([name | clauses], loc) when is_list(clauses) and length(clauses) >= 1 do
     # Check if this is multi-clause style (all elements are brackets)
     all_brackets? = Enum.all?(clauses, fn
       {:bracket, _} -> true
@@ -733,30 +743,35 @@ defmodule Vaisto.Parser do
   # (defn name [params] body) or (defn name [params] body1 body2 ...)
   # (defn name [params :when guard] :ret_type body) — guarded variant
   defp parse_defn_single(name, [{:bracket, params} | rest], loc) when length(rest) >= 1 do
-    {param_tokens, guard} = split_params_at_when(params)
-    typed_params = parse_typed_params(param_tokens)
+    case split_params_at_when(params) do
+      {:error, msg} ->
+        {:error, Errors.parse_error("in definition of `#{name}`: #{msg}", span: Error.span_from_loc(loc)), loc}
 
-    case rest do
-      # Single element is always the body - even if it looks like a type
-      # This allows (defn foo [] :int) to return the keyword :int
-      [single_body] ->
-        make_defn(name, typed_params, single_body, :any, guard, loc)
+      {param_tokens, guard} ->
+        typed_params = parse_typed_params(param_tokens)
 
-      # Type annotation followed by body: (defn name [params] :type body ...)
-      [{:atom, type_atom} | bodies] when length(bodies) >= 1 ->
-        if is_type_annotation?({:atom, type_atom}) do
-          body = wrap_bodies(bodies, loc)
-          make_defn(name, typed_params, body, unwrap_type({:atom, type_atom}), guard, loc)
-        else
-          # :keyword treated as body
-          body = wrap_bodies(rest, loc)
-          make_defn(name, typed_params, body, :any, guard, loc)
+        case rest do
+          # Single element is always the body - even if it looks like a type
+          # This allows (defn foo [] :int) to return the keyword :int
+          [single_body] ->
+            make_defn(name, typed_params, single_body, :any, guard, loc)
+
+          # Type annotation followed by body: (defn name [params] :type body ...)
+          [{:atom, type_atom} | bodies] when length(bodies) >= 1 ->
+            if is_type_annotation?({:atom, type_atom}) do
+              body = wrap_bodies(bodies, loc)
+              make_defn(name, typed_params, body, unwrap_type({:atom, type_atom}), guard, loc)
+            else
+              # :keyword treated as body
+              body = wrap_bodies(rest, loc)
+              make_defn(name, typed_params, body, :any, guard, loc)
+            end
+
+          # Multiple body expressions (no type annotation): (defn name [params] body1 body2 ...)
+          _ ->
+            body = wrap_bodies(rest, loc)
+            make_defn(name, typed_params, body, :any, guard, loc)
         end
-
-      # Multiple body expressions (no type annotation): (defn name [params] body1 body2 ...)
-      _ ->
-        body = wrap_bodies(rest, loc)
-        make_defn(name, typed_params, body, :any, guard, loc)
     end
   end
 
@@ -784,8 +799,9 @@ defmodule Vaisto.Parser do
 
     case after_when do
       [{:atom, :when}, guard] -> {before_when, guard}
+      [{:atom, :when}] -> {:error, "guard expression required after :when"}
+      [{:atom, :when} | _] -> {:error, "guard must be a single expression after :when"}
       [] -> {tokens, nil}
-      _ -> {tokens, nil}
     end
   end
 

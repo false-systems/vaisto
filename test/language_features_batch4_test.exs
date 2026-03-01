@@ -98,6 +98,30 @@ defmodule Vaisto.LanguageFeaturesBatch4Test do
       {:ok, mod} = Runner.compile_and_load(code, :NestedPat4)
       assert mod.main() == 77
     end
+
+    test "multi-clause with 2-field record pattern" do
+      code = """
+      (deftype Point [x :int y :int])
+      (defn get-x
+        [(Point x _) x])
+      (defn main [] (get-x (Point 42 99)))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :MultiFieldPat1)
+      assert mod.main() == 42
+    end
+
+    test "multi-clause with multiple 2-field record clauses" do
+      code = """
+      (deftype Pair [a :int b :int])
+      (defn swap
+        [(Pair a b) (Pair b a)])
+      (defn main []
+        (let [(Pair x y) (swap (Pair 1 2))]
+          (+ (* x 10) y)))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :MultiFieldPat2)
+      assert mod.main() == 21
+    end
   end
 
   # ═══════════════════════════════════════════════════════════════════
@@ -220,6 +244,20 @@ defmodule Vaisto.LanguageFeaturesBatch4Test do
       assert is_list(errors)
       # Should have errors from both functions (2 each = 4 total)
       assert length(errors) >= 4
+    end
+
+    test "clause bindings do not leak into subsequent clauses" do
+      # Variable y from clause 1's let should NOT be visible in clause 2.
+      # If y leaked as :num, (+ y 1) would type-check; without leakage it fails
+      # because y is just an atom literal.
+      code = """
+      (defn f
+        [(Ok x) (let [y (+ x 1)] y)]
+        [(Err z) (+ y 1)])
+      """
+      ast = Parser.parse(code)
+      result = TypeChecker.check(ast)
+      assert {:error, _} = result
     end
   end
 
