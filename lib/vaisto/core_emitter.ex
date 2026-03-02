@@ -442,7 +442,7 @@ defmodule Vaisto.CoreEmitter do
     :cerl.c_call(
       :cerl.c_atom(:erlang),
       :cerl.c_atom(:-),
-      [:cerl.c_int(0), to_core_expr_with_state(arg, state_var)]
+      [to_core_expr_with_state(arg, state_var)]
     )
   end
   defp to_core_expr_with_state({:call, :++, [left, right], _type}, state_var) do
@@ -654,12 +654,12 @@ defmodule Vaisto.CoreEmitter do
     :cerl.c_seq(first_expr, rest_expr)
   end
 
-  # Unary negation: (- x) → erlang:'-'(0, x)
+  # Unary negation: (- x) → erlang:'-'(x)
   defp to_core_expr({:call, :-, [arg], _type}, user_fns, local_vars) do
     :cerl.c_call(
       :cerl.c_atom(:erlang),
       :cerl.c_atom(:-),
-      [:cerl.c_int(0), to_core_expr(arg, user_fns, local_vars)]
+      [to_core_expr(arg, user_fns, local_vars)]
     )
   end
 

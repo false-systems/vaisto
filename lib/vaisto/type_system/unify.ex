@@ -131,6 +131,7 @@ defmodule Vaisto.TypeSystem.Unify do
         {:ok, subst, row_counter}
 
       # Singleton atom vs :atom (atom subtyping)
+      # Two different singleton atoms also unify — they widen to :atom at the BEAM level
       (match?({:atom, _}, t1) and t2 == :atom) or
       (t1 == :atom and match?({:atom, _}, t2)) or
       (match?({:atom, _}, t1) and match?({:atom, _}, t2)) ->

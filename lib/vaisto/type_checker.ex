@@ -1660,9 +1660,11 @@ defmodule Vaisto.TypeChecker do
 
   defp apply_subst_to_clauses(subst, clauses) when is_list(clauses) do
     Enum.map(clauses, fn
+      {pattern, guard, body, type} ->
+        typed_guard = if guard, do: apply_subst_to_ast(subst, guard), else: nil
+        {pattern, typed_guard, apply_subst_to_ast(subst, body), C.apply_subst(subst, type)}
       {pattern, body, type} ->
         {pattern, apply_subst_to_ast(subst, body), C.apply_subst(subst, type)}
-      other -> other
     end)
   end
 
@@ -2339,8 +2341,11 @@ defmodule Vaisto.TypeChecker do
     typed_pattern = type_pattern(pattern, instantiated_type, ctx.env)
 
     case check_s(body, extended_ctx) do
-      {:ok, body_type, typed_body, ctx} ->
-        {:ok, {typed_pattern, typed_body, body_type}, ctx}
+      {:ok, body_type, typed_body, clause_ctx} ->
+        # Propagate substitution updates but restore the outer env
+        # (pattern-bound variables must not leak out of match clauses)
+        restored_ctx = %{clause_ctx | env: ctx.env}
+        {:ok, {typed_pattern, typed_body, body_type}, restored_ctx}
       error -> error
     end
   end
@@ -2601,6 +2606,7 @@ defmodule Vaisto.TypeChecker do
 
   defp expect_bool(:bool), do: :ok
   defp expect_bool(:any), do: :ok
+  defp expect_bool({:tvar, _}), do: :ok
   defp expect_bool(other), do: {:error, Errors.type_mismatch(:bool, other, hint: "conditions must be boolean")}
 
   # Check that a type is numeric (int, float, or num)

@@ -300,4 +300,78 @@ defmodule Vaisto.LanguageFeaturesBatch4Test do
       assert mod.main() == 10
     end
   end
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Bug Fix Regression Tests
+  # ═══════════════════════════════════════════════════════════════════
+
+  describe "apply_subst_to_clauses handles 4-tuple (guard) clauses" do
+    test "defn_multi with guard type-checks and compiles" do
+      code = """
+      (defn my-abs
+        [x :when (> x 0) x]
+        [x (- 0 x)])
+      (defn main [] (my-abs -5))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :SubstGuardClause)
+      assert mod.main() == 5
+    end
+
+    test "defn_multi guard clause types are resolved" do
+      code = """
+      (defn classify
+        [x :when (> x 0) :positive]
+        [x :when (< x 0) :negative]
+        [_ :zero])
+      (defn main [] (classify 42))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :SubstGuardTypes)
+      assert mod.main() == :positive
+    end
+  end
+
+  describe "match clause variable scoping" do
+    test "pattern variables do not leak out of match" do
+      # After a match, variables bound inside clauses should not be
+      # accessible in the outer scope
+      code = """
+      (deftype Result (Ok v) (Err e))
+      (defn main [] :int
+        (let [r (Ok 42)]
+          (let [x (match r
+                    [(Ok v) v]
+                    [(Err e) 0])]
+            x)))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :MatchScopeLeak1)
+      assert mod.main() == 42
+    end
+
+    test "match bindings from one clause do not leak to next" do
+      # Each match clause's bindings are independent
+      code = """
+      (deftype Result (Ok v) (Err e))
+      (defn main [] :int
+        (let [r (Ok 99)]
+          (match r
+            [(Ok val) val]
+            [(Err _) 0])))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :MatchScopeLeak2)
+      assert mod.main() == 99
+    end
+  end
+
+  describe "expect_bool accepts type variables" do
+    test "polymorphic value in if condition does not error" do
+      # A type variable should be accepted as a boolean in if conditions
+      # This tests expect_bool/1 handling {:tvar, _}
+      code = """
+      (defn check [b :bool] :int (if b 1 0))
+      (defn main [] (check true))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :ExpectBoolTvar)
+      assert mod.main() == 1
+    end
+  end
 end

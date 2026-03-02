@@ -38,6 +38,14 @@ defmodule Vaisto.Emitter do
     Enum.map(elements, &to_elixir/1)
   end
 
+  # Map literal
+  def to_elixir({:map, pairs, _type}) do
+    map_pairs = Enum.map(pairs, fn {key, val} ->
+      {to_elixir(key), to_elixir(val)}
+    end)
+    {:%{}, [], map_pairs}
+  end
+
   # Variables become Elixir variables
   # Using Macro.var ensures proper hygiene in quote blocks
   def to_elixir({:var, name, _type}) do
@@ -383,6 +391,16 @@ defmodule Vaisto.Emitter do
     end
   end
 
+  # Value binding → zero-arity Elixir function
+  def to_elixir({:defval, name, value, _type}) do
+    body_ast = to_elixir(value)
+    quote do
+      def unquote(name)() do
+        unquote(body_ast)
+      end
+    end
+  end
+
   # Function definition → Elixir def
   def to_elixir({:defn, name, params, body, _type}) do
     param_vars = Enum.map(params, &Macro.var(&1, nil))
@@ -582,6 +600,25 @@ defmodule Vaisto.Emitter do
           unquote(elixir_ast)
           def main, do: unquote(name)()
         end
+      end
+    end
+
+    try do
+      [{^module_name, bytecode}] = Code.compile_quoted(module_ast)
+      {:ok, module_name, bytecode}
+    rescue
+      e -> {:error, Errors.compilation_error(Exception.message(e))}
+    end
+  end
+
+  # Single defval compilation - wrap in module with zero-arity function
+  def compile({:defval, name, _value, _type} = defval_ast, module_name) do
+    elixir_ast = to_elixir(defval_ast)
+
+    module_ast = quote do
+      defmodule unquote(module_name) do
+        unquote(elixir_ast)
+        def main, do: unquote(name)()
       end
     end
 
