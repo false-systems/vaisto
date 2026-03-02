@@ -362,6 +362,21 @@ defmodule Vaisto.LanguageFeaturesBatch4Test do
     end
   end
 
+  describe "row counter threading in TcCtx" do
+    test "multiple unifications in same expression preserve row counter" do
+      # Exercises row counter threading: multiple record pattern matches
+      # in the same function each need fresh row variables
+      code = """
+      (deftype Point [x :int y :int])
+      (defn get-x [(Point x _) x])
+      (defn get-y [(Point _ y) y])
+      (defn main [] (+ (get-x (Point 10 20)) (get-y (Point 30 40))))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :RowCounterThread)
+      assert mod.main() == 50
+    end
+  end
+
   describe "expect_bool accepts type variables" do
     test "polymorphic value in if condition does not error" do
       # A type variable should be accepted as a boolean in if conditions

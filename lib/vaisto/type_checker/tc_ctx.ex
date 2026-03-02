@@ -1,24 +1,24 @@
 defmodule Vaisto.TypeChecker.TcCtx do
   @moduledoc """
-  Type-checking context that threads a substitution through the TypeChecker.
+  Type-checking context that threads a substitution and row counter
+  through the TypeChecker.
 
-  Unlike `Vaisto.TypeSystem.Context` (used by Infer/Algorithm W), this context
-  does not carry a fresh variable counter — the TypeChecker uses
-  `:erlang.unique_integer` for fresh tvars. This keeps TcCtx minimal.
+  The row_counter tracks fresh row variable IDs to prevent collisions
+  when multiple row-polymorphic unifications occur in the same expression.
   """
 
   alias Vaisto.TypeSystem.Core
   alias Vaisto.TypeSystem.Unify
 
-  defstruct [:env, :subst]
+  defstruct [:env, :subst, row_counter: 0]
 
   @doc "Create a new context from a type environment."
-  def new(env), do: %__MODULE__{env: env, subst: Core.empty_subst()}
+  def new(env), do: %__MODULE__{env: env, subst: Core.empty_subst(), row_counter: 0}
 
-  @doc "Unify two types within this context, updating the substitution."
-  def unify(%__MODULE__{subst: subst} = ctx, t1, t2) do
-    case Unify.unify(t1, t2, subst) do
-      {:ok, new_subst, _row_counter} -> {:ok, %{ctx | subst: new_subst}}
+  @doc "Unify two types within this context, updating the substitution and row counter."
+  def unify(%__MODULE__{subst: subst, row_counter: rc} = ctx, t1, t2) do
+    case Unify.unify(t1, t2, subst, rc) do
+      {:ok, new_subst, new_rc} -> {:ok, %{ctx | subst: new_subst, row_counter: new_rc}}
       {:error, _} = err -> err
     end
   end

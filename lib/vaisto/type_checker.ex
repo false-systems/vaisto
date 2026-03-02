@@ -2671,10 +2671,10 @@ defmodule Vaisto.TypeChecker do
     resolved_t1 = Vaisto.TypeSystem.Core.apply_subst(ctx.subst, t1)
     resolved_t2 = Vaisto.TypeSystem.Core.apply_subst(ctx.subst, t2)
 
-    case Vaisto.TypeSystem.Unify.unify(resolved_t1, resolved_t2, ctx.subst) do
-      {:ok, new_subst, _} ->
+    case Vaisto.TypeSystem.Unify.unify(resolved_t1, resolved_t2, ctx.subst, ctx.row_counter) do
+      {:ok, new_subst, new_rc} ->
         unified = Vaisto.TypeSystem.Core.apply_subst(new_subst, resolved_t1)
-        {:ok, unified, %{ctx | subst: new_subst}}
+        {:ok, unified, %{ctx | subst: new_subst, row_counter: new_rc}}
       {:error, _} ->
         if numeric_compatible?(resolved_t1, resolved_t2),
           do: {:ok, :num, ctx},
@@ -2709,22 +2709,22 @@ defmodule Vaisto.TypeChecker do
 
       result = Enum.zip([expected_args, actual_args, padded_orig])
         |> Enum.with_index()
-        |> Enum.reduce_while({:ok, ctx.subst}, fn {{exp, act, _orig}, idx}, {:ok, subst} ->
+        |> Enum.reduce_while({:ok, ctx.subst, ctx.row_counter}, fn {{exp, act, _orig}, idx}, {:ok, subst, rc} ->
           resolved_exp = Vaisto.TypeSystem.Core.apply_subst(subst, exp)
           cond do
             resolved_exp == :any or act == :any ->
               case exp do
-                {:tvar, id} -> {:cont, {:ok, Map.put_new(subst, id, :any)}}
-                _ -> {:cont, {:ok, subst}}
+                {:tvar, id} -> {:cont, {:ok, Map.put_new(subst, id, :any), rc}}
+                _ -> {:cont, {:ok, subst, rc}}
               end
 
             true ->
-              case Vaisto.TypeSystem.Unify.unify(resolved_exp, act, subst) do
-                {:ok, new_subst, _} -> {:cont, {:ok, new_subst}}
+              case Vaisto.TypeSystem.Unify.unify(resolved_exp, act, subst, rc) do
+                {:ok, new_subst, new_rc} -> {:cont, {:ok, new_subst, new_rc}}
                 {:error, _} ->
                   if match?({:tvar, _}, exp) and numeric_compatible?(resolved_exp, act) do
                     {:tvar, id} = exp
-                    {:cont, {:ok, Map.put(subst, id, :num)}}
+                    {:cont, {:ok, Map.put(subst, id, :num), rc}}
                   else
                     call_note = if display_name,
                       do: "in call to `#{display_name}`, at argument #{idx + 1}",
@@ -2744,9 +2744,9 @@ defmodule Vaisto.TypeChecker do
         end)
 
       case result do
-        {:ok, subst} ->
+        {:ok, subst, rc} ->
           resolved_ret = Vaisto.TypeSystem.Core.apply_subst(subst, ret_type)
-          {:ok, resolved_ret, %{ctx | subst: subst}}
+          {:ok, resolved_ret, %{ctx | subst: subst, row_counter: rc}}
         {:error, _} = err -> err
       end
     end
