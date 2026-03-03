@@ -196,6 +196,21 @@ defmodule Vaisto.TypeChecker do
       nil ->
         {:ok, {:atom, a}, {:lit, :atom, a}}
 
+      {:forall, _, _} = scheme ->
+        # Instantiate polymorphic scheme (uses a temporary TcCtx)
+        ctx = TcCtx.new(env)
+        {type, _ctx} = TcCtx.instantiate(ctx, scheme)
+        case type do
+          {:fn, params, _ret} ->
+            if is_local_var?(a, env) do
+              {:ok, type, {:var, a, type}}
+            else
+              {:ok, type, {:fn_ref, a, length(params), type}}
+            end
+          _ ->
+            {:ok, type, {:var, a, type}}
+        end
+
       {:fn, params, _ret} = type ->
         # Function type - check if it's local or module-level
         if is_local_var?(a, env) do
@@ -335,6 +350,19 @@ defmodule Vaisto.TypeChecker do
     case Map.get(ctx.env, name) do
       nil ->
         {:error, Errors.undefined_variable(name, local_var_names(ctx.env))}
+      {:forall, _, _} = scheme ->
+        # Instantiate polymorphic scheme with fresh tvars
+        {type, ctx} = TcCtx.instantiate(ctx, scheme)
+        case type do
+          {:fn, params, _ret} ->
+            if is_local_var?(name, ctx.env) do
+              {:ok, type, {:var, name, type}, ctx}
+            else
+              {:ok, type, {:fn_ref, name, length(params), type}, ctx}
+            end
+          _ ->
+            {:ok, type, {:var, name, type}, ctx}
+        end
       {:fn, params, _ret} = type ->
         if is_local_var?(name, ctx.env) do
           {:ok, type, {:var, name, type}, ctx}
@@ -741,21 +769,21 @@ defmodule Vaisto.TypeChecker do
 
   # Function call (atom) — full ctx threading with unify_call_s
   defp check_impl_s({:call, func, args}, ctx) when is_atom(func) do
-    with {:ok, func_type} <- lookup_function(func, ctx.env) do
+    with {:ok, func_type, ctx} <- lookup_function_s(func, ctx) do
       case func_type do
         {:constrained_method, vars, constraints, fn_type, method_name} ->
           check_class_method_call_s(method_name, vars, constraints, fn_type, args, ctx)
 
-        {:forall, vars, fn_type} ->
-          base_id = :erlang.unique_integer([:positive, :monotonic]) * 1000
-          fresh_subst = vars
-            |> Enum.with_index()
-            |> Map.new(fn {var, idx} -> {var, {:tvar, base_id + idx}} end)
-          inst_fn_type = Vaisto.TypeSystem.Core.apply_subst(fresh_subst, fn_type)
+        {:forall, _, _} = scheme ->
+          {inst_fn_type, ctx} = TcCtx.instantiate(ctx, scheme)
 
           with {:ok, arg_types, typed_args, ctx} <- check_args_s(args, ctx),
                {:ok, ret_type, ctx} <- unify_call_s(inst_fn_type, arg_types, ctx, args, func) do
-            {:ok, ret_type, {:call, func, typed_args, ret_type}, ctx}
+            if is_local_var?(func, ctx.env) do
+              {:ok, ret_type, {:apply, {:var, func, inst_fn_type}, typed_args, ret_type}, ctx}
+            else
+              {:ok, ret_type, {:call, func, typed_args, ret_type}, ctx}
+            end
           end
 
         _ ->
@@ -1696,7 +1724,25 @@ defmodule Vaisto.TypeChecker do
       {:fn, _, {:record, _, _}} = ctor_type -> {:ok, instantiate_constructor_type(ctor_type)}
       {:forall, vars, {:constrained, constraints, fn_type}} ->
         {:ok, {:constrained_method, vars, constraints, fn_type, name}}
+      {:forall, _, _} = scheme -> {:ok, scheme}
       type -> {:ok, type}
+    end
+  end
+
+  # Stateful lookup that threads ctx for deterministic tvar generation
+  defp lookup_function_s(name, ctx) do
+    case Map.get(ctx.env, name) do
+      nil -> {:error, Errors.unknown_function(name, fn_names(ctx.env))}
+      {:fn, _, {:sum, _, _}} = ctor_type ->
+        {type, ctx} = instantiate_constructor_type_s(ctor_type, ctx)
+        {:ok, type, ctx}
+      {:fn, _, {:record, _, _}} = ctor_type ->
+        {type, ctx} = instantiate_constructor_type_s(ctor_type, ctx)
+        {:ok, type, ctx}
+      {:forall, vars, {:constrained, constraints, fn_type}} ->
+        {:ok, {:constrained_method, vars, constraints, fn_type, name}, ctx}
+      {:forall, _, _} = scheme -> {:ok, scheme, ctx}
+      type -> {:ok, type, ctx}
     end
   end
 
@@ -1729,8 +1775,14 @@ defmodule Vaisto.TypeChecker do
 
   # Extract function names from env for did-you-mean suggestions
   defp fn_names(env) do
-    for {name, {:fn, _, _}} <- env, is_atom(name), do: name
+    for {name, type} <- env, is_atom(name), fn_type?(type), do: name
   end
+
+  defp fn_type?({:fn, _, _}), do: true
+  defp fn_type?({:forall, _, {:fn, _, _}}), do: true
+  defp fn_type?({:forall, _, {:constrained, _, {:fn, _, _}}}), do: true
+  defp fn_type?({:constrained_method, _, _, _, _}), do: true
+  defp fn_type?(_), do: false
 
   # Extract process names from env for did-you-mean suggestions
   defp process_names(env) do
@@ -2245,7 +2297,9 @@ defmodule Vaisto.TypeChecker do
   defp check_bindings_s([{name, expr} | rest], ctx, acc) when is_atom(name) do
     case check_s(expr, ctx) do
       {:ok, type, typed_expr, ctx} ->
-        extended_ctx = %{ctx | env: ctx.env |> Map.put(name, type) |> add_local_var(name)}
+        # Generalize for let-polymorphism: (let [id (fn [x] x)] ...)
+        scheme = TcCtx.generalize(ctx, type)
+        extended_ctx = %{ctx | env: ctx.env |> Map.put(name, scheme) |> add_local_var(name)}
         check_bindings_s(rest, extended_ctx, [{name, typed_expr, type} | acc])
       error -> error
     end
@@ -2302,19 +2356,21 @@ defmodule Vaisto.TypeChecker do
 
   # Context-threaded check_match_clauses
   defp check_match_clauses_s(clauses, expr_type, ctx) do
-    results = Enum.map(clauses, fn {pattern, body} ->
-      check_match_clause_s(pattern, body, expr_type, ctx)
+    # Thread ctx through clauses sequentially for deterministic tvar generation
+    result = Enum.reduce_while(clauses, {:ok, [], ctx}, fn {pattern, body}, {:ok, acc, ctx} ->
+      case check_match_clause_s(pattern, body, expr_type, ctx) do
+        {:ok, clause, ctx} -> {:cont, {:ok, [clause | acc], ctx}}
+        {:error, _} = err -> {:halt, err}
+      end
     end)
 
-    case Enum.find(results, &match?({:error, _}, &1)) do
+    case result do
       {:error, _} = err -> err
-      nil ->
-        typed_clauses = Enum.map(results, fn {:ok, clause, _ctx} -> clause end)
-        # Thread ctx from last clause (accumulates all branch substitutions)
-        last_ctx = results |> List.last() |> elem(2)
+      {:ok, rev_typed_clauses, ctx} ->
+        typed_clauses = Enum.reverse(rev_typed_clauses)
         [{_pattern, _body, first_type} | rest_clauses] = typed_clauses
 
-        unified_result = Enum.reduce_while(rest_clauses, {:ok, first_type, last_ctx}, fn {_, _, body_type}, {:ok, acc_type, ctx} ->
+        unified_result = Enum.reduce_while(rest_clauses, {:ok, first_type, ctx}, fn {_, _, body_type}, {:ok, acc_type, ctx} ->
           case unify_types_s(acc_type, body_type, ctx) do
             {:ok, unified, ctx} -> {:cont, {:ok, unified, ctx}}
             {:error, _} = err -> {:halt, err}
@@ -2333,7 +2389,7 @@ defmodule Vaisto.TypeChecker do
   end
 
   defp check_match_clause_s(pattern, body, expr_type, ctx) do
-    instantiated_type = instantiate_sum_tvars(expr_type)
+    {instantiated_type, ctx} = instantiate_sum_tvars_s(expr_type, ctx)
     bindings = extract_pattern_bindings(pattern, instantiated_type, ctx.env)
     extended_ctx = %{ctx | env: Enum.reduce(bindings, ctx.env, fn {name, type}, acc ->
       Map.put(acc, name, type)
@@ -2352,17 +2408,19 @@ defmodule Vaisto.TypeChecker do
 
   # Context-threaded check_receive_clauses
   defp check_receive_clauses_s(clauses, ctx) do
-    results = Enum.map(clauses, fn {pattern, body} ->
-      check_receive_clause_s(pattern, body, ctx)
+    result = Enum.reduce_while(clauses, {:ok, [], ctx}, fn {pattern, body}, {:ok, acc, ctx} ->
+      case check_receive_clause_s(pattern, body, ctx) do
+        {:ok, clause, ctx} -> {:cont, {:ok, [clause | acc], ctx}}
+        {:error, _} = err -> {:halt, err}
+      end
     end)
 
-    case Enum.find(results, &match?({:error, _}, &1)) do
+    case result do
       {:error, _} = err -> err
-      nil ->
-        typed_clauses = Enum.map(results, fn {:ok, clause, _ctx} -> clause end)
-        last_ctx = results |> List.last() |> elem(2)
+      {:ok, rev_typed, ctx} ->
+        typed_clauses = Enum.reverse(rev_typed)
         [{_pattern, _body, result_type} | _] = typed_clauses
-        {:ok, result_type, typed_clauses, last_ctx}
+        {:ok, result_type, typed_clauses, ctx}
     end
   end
 
@@ -2398,24 +2456,25 @@ defmodule Vaisto.TypeChecker do
 
   # Context-threaded check_generic_call
   defp check_generic_call_s(func, args, ctx) do
-    with {:ok, func_type} <- lookup_function(func, ctx.env),
-         {:ok, arg_types, typed_args, ctx} <- check_args_s(args, ctx),
-         {:ok, ret_type, ctx} <- unify_call_s(func_type, arg_types, ctx, [], func) do
-      {:ok, ret_type, {:call, func, typed_args, ret_type}, ctx}
+    with {:ok, func_type, ctx} <- lookup_function_s(func, ctx) do
+      # Instantiate if polymorphic
+      {func_type, ctx} = TcCtx.instantiate(ctx, func_type)
+      with {:ok, arg_types, typed_args, ctx} <- check_args_s(args, ctx),
+           {:ok, ret_type, ctx} <- unify_call_s(func_type, arg_types, ctx, [], func) do
+        {:ok, ret_type, {:call, func, typed_args, ret_type}, ctx}
+      end
     end
   end
 
   # Context-threaded check_class_method_call
   defp check_class_method_call_s(method_name, vars, constraints, fn_type, args, ctx) do
-    base_id = :erlang.unique_integer([:positive, :monotonic]) * 1000
-    fresh_subst = vars
-      |> Enum.with_index()
-      |> Map.new(fn {var, idx} -> {var, {:tvar, base_id + idx}} end)
-
-    inst_fn_type = Vaisto.TypeSystem.Core.apply_subst(fresh_subst, fn_type)
-    inst_constraints = Enum.map(constraints, fn {class, t} ->
-      {class, Vaisto.TypeSystem.Core.apply_subst(fresh_subst, t)}
-    end)
+    scheme = {:forall, vars, {:constrained, constraints, fn_type}}
+    prev_constraints = ctx.constraints
+    {inst_fn_type, ctx} = TcCtx.instantiate(ctx, scheme)
+    # Extract only the newly added constraints from this instantiation
+    inst_constraints = Enum.drop(ctx.constraints, length(prev_constraints))
+    # Restore previous constraints (resolve_class_constraints handles these)
+    ctx = %{ctx | constraints: prev_constraints}
 
     with {:ok, arg_types, typed_args, ctx} <- check_args_s(args, ctx),
          {:ok, ret_type, ctx} <- unify_call_s(inst_fn_type, arg_types, ctx, args, method_name) do
@@ -3190,6 +3249,9 @@ defmodule Vaisto.TypeChecker do
       {:defn, name, _params, _body, func_type} ->
         Map.put(env, name, func_type)
 
+      {:defn, name, _params, _body, func_type, _guard} ->
+        Map.put(env, name, func_type)
+
       {:defn_multi, name, _arity, _clauses, func_type} ->
         Map.put(env, name, func_type)
 
@@ -3302,6 +3364,35 @@ defmodule Vaisto.TypeChecker do
     end
   end
   defp instantiate_sum_tvars(other), do: other
+
+  # Stateful variants that thread ctx for deterministic tvar generation
+  defp instantiate_constructor_type_s({:fn, params, ret}, ctx) do
+    tvar_ids = collect_tvar_ids(params ++ [ret])
+    if tvar_ids == [] do
+      {{:fn, params, ret}, ctx}
+    else
+      {fresh, ctx} = TcCtx.fresh_vars(ctx, length(tvar_ids))
+      mapping = Enum.zip(tvar_ids, fresh) |> Map.new()
+      type = {:fn,
+        Enum.map(params, &Vaisto.TypeSystem.Core.apply_subst(mapping, &1)),
+        Vaisto.TypeSystem.Core.apply_subst(mapping, ret)}
+      {type, ctx}
+    end
+  end
+
+  defp instantiate_sum_tvars_s({:sum, name, variants}, ctx) do
+    tvar_ids = variants
+    |> Enum.flat_map(fn {_, types} -> collect_tvar_ids(types) end)
+    |> Enum.uniq()
+    if tvar_ids == [] do
+      {{:sum, name, variants}, ctx}
+    else
+      {fresh, ctx} = TcCtx.fresh_vars(ctx, length(tvar_ids))
+      mapping = Enum.zip(tvar_ids, fresh) |> Map.new()
+      {Vaisto.TypeSystem.Core.apply_subst(mapping, {:sum, name, variants}), ctx}
+    end
+  end
+  defp instantiate_sum_tvars_s(other, ctx), do: {other, ctx}
 
   # Collect all tvar ids from a type or list of types
   defp collect_tvar_ids(types) when is_list(types) do

@@ -312,6 +312,24 @@ defmodule Vaisto.TypeCheckerTest do
 
       assert type == :int
     end
+
+    test "let-polymorphism through TypeChecker.check path" do
+      # (let [id (fn [x] x)] (+ (id 1) 2))
+      ast = {:let, [{:id, {:fn, [:x], :x}}],
+             {:call, :+, [{:call, :id, [1]}, 2]}}
+      assert {:ok, :int, _} = TypeChecker.check(ast)
+    end
+
+    test "let-polymorphism: id used at multiple types" do
+      # (let [id (fn [x] x)]
+      #   (let [_ (id true)]
+      #     (id 42)))
+      # id is used as bool->bool and int->int
+      ast = {:let, [{:id, {:fn, [:x], :x}}],
+             {:let, [{:_, {:call, :id, [true]}}],
+              {:call, :id, [42]}}}
+      assert {:ok, :int, _} = TypeChecker.check(ast)
+    end
   end
 
   describe "polymorphic == and != operators" do
