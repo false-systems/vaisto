@@ -10,11 +10,11 @@ defmodule Vaisto.TypeChecker.TcCtx do
   alias Vaisto.TypeSystem.Core
   alias Vaisto.TypeSystem.Unify
 
-  defstruct [:env, :subst, row_counter: 0, counter: 10_000, constraints: [], constrained_tvars: MapSet.new()]
+  defstruct [:env, :subst, row_counter: 0, counter: 10_000, constraints: [], constrained_tvars: %{}]
 
   @doc "Create a new context from a type environment."
   def new(env) do
-    %__MODULE__{env: env, subst: Core.empty_subst(), row_counter: 0, counter: 10_000, constrained_tvars: MapSet.new()}
+    %__MODULE__{env: env, subst: Core.empty_subst(), row_counter: 0, counter: 10_000, constrained_tvars: %{}}
   end
 
   @doc "Unify two types within this context, updating the substitution and row counter."
@@ -92,22 +92,33 @@ defmodule Vaisto.TypeChecker.TcCtx do
     end
   end
 
-  @doc "Mark a type variable as constrained (used by a typeclassed operation)."
+  @doc "Mark a type variable as constrained (backward-compatible, uses :Unknown class)."
   def mark_constrained(%__MODULE__{} = ctx, {:tvar, id}) do
-    %{ctx | constrained_tvars: MapSet.put(ctx.constrained_tvars, id)}
+    mark_constrained(ctx, {:tvar, id}, :Unknown)
   end
   def mark_constrained(ctx, _), do: ctx
+
+  @doc "Mark a type variable as constrained by a specific class."
+  def mark_constrained(%__MODULE__{} = ctx, {:tvar, id}, class) do
+    existing = Map.get(ctx.constrained_tvars, id, MapSet.new())
+    %{ctx | constrained_tvars: Map.put(ctx.constrained_tvars, id, MapSet.put(existing, class))}
+  end
+  def mark_constrained(ctx, _, _class), do: ctx
 
   @doc """
   Generalize a type conservatively.
 
   `eligible_tvars` is the set of tvar IDs created by freshening — only these
-  can be quantified. Constrained tvars (from typeclassed operations) are pinned
-  to `:any`. All other tvars (e.g. from ADT definitions) are left as-is.
+  can be quantified. Constrained tvars emit class constraints in the scheme.
+  All other tvars (e.g. from ADT definitions) are left as-is.
   """
   def generalize_conservative(%__MODULE__{subst: subst, constrained_tvars: constrained}, type, eligible_tvars) do
-    # Pin constrained tvars to :any BEFORE applying the main subst
-    pin_subst = constrained
+    # Pin constrained tvars that are NOT eligible to :any (they can't be quantified)
+    non_eligible_constrained = constrained
+      |> Map.keys()
+      |> Enum.reject(&MapSet.member?(eligible_tvars, &1))
+
+    pin_subst = non_eligible_constrained
       |> Enum.map(fn id -> {id, :any} end)
       |> Map.new()
 
@@ -120,9 +131,18 @@ defmodule Vaisto.TypeChecker.TcCtx do
       |> Enum.filter(&MapSet.member?(eligible_tvars, &1))
       |> Enum.sort()
 
-    case quantified do
-      [] -> type
-      _ -> {:forall, quantified, type}
+    # Build constraints for quantified tvars that have class annotations
+    constraints = Enum.flat_map(quantified, fn id ->
+      case Map.get(constrained, id) do
+        nil -> []
+        classes -> Enum.map(Enum.sort(MapSet.to_list(classes)), fn class -> {class, {:tvar, id}} end)
+      end
+    end)
+
+    case {quantified, constraints} do
+      {[], _} -> type
+      {_, []} -> {:forall, quantified, type}
+      _ -> {:forall, quantified, {:constrained, constraints, type}}
     end
   end
 
