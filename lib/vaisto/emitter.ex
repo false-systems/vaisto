@@ -54,6 +54,13 @@ defmodule Vaisto.Emitter do
 
   # Function reference - module-level function passed as value
   # Becomes &name/arity in Elixir
+  def to_elixir({:fn_ref, :cons, 2, _type}) do
+    # cons as a first-class function: fn h, t -> [h | t] end
+    h = Macro.var(:__h__, nil)
+    t = Macro.var(:__t__, nil)
+    {:fn, [], [{:->, [], [[h, t], [{:|, [], [h, t]}]]}]}
+  end
+
   def to_elixir({:fn_ref, name, arity, _type}) do
     {:&, [], [{:/, [], [{name, [], nil}, arity]}]}
   end

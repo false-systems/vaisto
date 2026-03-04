@@ -55,7 +55,9 @@ defmodule Vaisto.TypeEnv do
       }},
       Show: {:class, :Show, [0], [
         {:show, {:fn, [{:tvar, 0}], :string}}
-      ], %{}}
+      ], %{}},
+      Num: {:builtin_class, :Num, [0], []},
+      Ord: {:builtin_class, :Ord, [0], []}
     },
     # Instance registry: {ClassName, ConcreteType} => %{method => type}
     :__instances__ => %{
@@ -67,7 +69,16 @@ defmodule Vaisto.TypeEnv do
       {:Show, :int} => %{show: {:fn, [:int], :string}},
       {:Show, :float} => %{show: {:fn, [:float], :string}},
       {:Show, :string} => %{show: {:fn, [:string], :string}},
-      {:Show, :bool} => %{show: {:fn, [:bool], :string}}
+      {:Show, :bool} => %{show: {:fn, [:bool], :string}},
+      # Built-in Num instances (no dictionary, operators compile directly)
+      {:Num, :int} => :builtin,
+      {:Num, :float} => :builtin,
+      {:Num, :num} => :builtin,
+      # Built-in Ord instances
+      {:Ord, :int} => :builtin,
+      {:Ord, :float} => :builtin,
+      {:Ord, :string} => :builtin,
+      {:Ord, :num} => :builtin
     }
   }
 

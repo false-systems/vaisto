@@ -193,6 +193,9 @@ defmodule Vaisto.TypeChecker do
   # If it's in the env (like :state in a handler), it's a variable
   def check(a, env) when is_atom(a) do
     case Map.get(env, a) do
+      nil when a == :cons ->
+        # cons is a built-in list constructor, give it a polymorphic function type
+        {:ok, {:fn, [:any, {:list, :any}], {:list, :any}}, {:fn_ref, :cons, 2, {:fn, [:any, {:list, :any}], {:list, :any}}}}
       nil ->
         {:ok, {:atom, a}, {:lit, :atom, a}}
 
@@ -771,8 +774,8 @@ defmodule Vaisto.TypeChecker do
   defp check_impl_s({:call, op, [left, right]}, ctx) when op in [:<, :>, :<=, :>=] do
     with {:ok, left_type, typed_left, ctx} <- check_s(left, ctx),
          {:ok, right_type, typed_right, ctx} <- check_s(right, ctx),
-         {:ok, ctx} <- expect_numeric_s(left_type, "comparison", ctx),
-         {:ok, ctx} <- expect_numeric_s(right_type, "comparison", ctx) do
+         {:ok, ctx} <- expect_ord_s(left_type, op, ctx),
+         {:ok, ctx} <- expect_ord_s(right_type, op, ctx) do
       {:ok, :bool, {:call, op, [typed_left, typed_right], :bool}, ctx}
     end
   end
@@ -788,7 +791,8 @@ defmodule Vaisto.TypeChecker do
           {inst_fn_type, ctx} = TcCtx.instantiate(ctx, scheme)
 
           with {:ok, arg_types, typed_args, ctx} <- check_args_s(args, ctx),
-               {:ok, ret_type, ctx} <- unify_call_s(inst_fn_type, arg_types, ctx, args, func) do
+               {:ok, ret_type, ctx} <- unify_call_s(inst_fn_type, arg_types, ctx, args, func),
+               {:ok, ctx} <- verify_builtin_constraints(ctx) do
             if is_local_var?(func, ctx.env) do
               {:ok, ret_type, {:apply, {:var, func, inst_fn_type}, typed_args, ret_type}, ctx}
             else
@@ -899,7 +903,7 @@ defmodule Vaisto.TypeChecker do
             final_ret_type = if declared_ret_type != :any, do: declared_ret_type, else: inferred_ret_type
             mono_type = {:fn, fresh_param_types, final_ret_type}
             scheme = TcCtx.generalize_conservative(body_ctx, mono_type, eligible_tvars)
-            ast_type = pin_constrained_tvars(mono_type, body_ctx)
+            ast_type = pin_constrained_tvars(mono_type, body_ctx, eligible_tvars)
             ctx_out = %{body_ctx | constrained_tvars: saved_constrained}
             {:ok, scheme, {:defn, name, param_names, typed_body, ast_type, typed_guard}, ctx_out}
           end
@@ -942,7 +946,7 @@ defmodule Vaisto.TypeChecker do
           scheme = TcCtx.generalize_conservative(body_ctx, mono_type, eligible_tvars)
 
           # Typed AST uses monotype with constrained tvars pinned to :any
-          ast_type = pin_constrained_tvars(mono_type, body_ctx)
+          ast_type = pin_constrained_tvars(mono_type, body_ctx, eligible_tvars)
           ctx_out = %{body_ctx | constrained_tvars: saved_constrained}
           {:ok, scheme, {:defn, name, param_names, typed_body, ast_type}, ctx_out}
         end
@@ -1008,53 +1012,80 @@ defmodule Vaisto.TypeChecker do
     arity = 1
 
     param_types = infer_multi_clause_param_types(clauses, arity)
-    self_type = {:fn, param_types, :any}
-    extended_ctx = %{ctx | env: Map.put(ctx.env, name, self_type)}
 
-    typed_clauses_result = Enum.reduce(clauses, {:ok, [], []}, fn
-      {pattern, guard, body}, {:ok, typed_acc, error_acc} ->
-        # Each clause starts from extended_ctx — no leakage from previous clauses
+    # Freshen :any params with tvars for polymorphic inference
+    {fresh_param_types, ctx} = freshen_any_params(param_types, ctx)
+    eligible_tvars = fresh_param_types
+      |> Enum.flat_map(fn {:tvar, id} -> [id]; _ -> [] end)
+      |> MapSet.new()
+
+    self_type = {:fn, fresh_param_types, :any}
+
+    # Save and reset constrained_tvars for this defn scope
+    saved_constrained = ctx.constrained_tvars
+    extended_ctx = %{ctx | env: Map.put(ctx.env, name, self_type), constrained_tvars: %{}}
+
+    typed_clauses_result = Enum.reduce(clauses, {:ok, [], [], extended_ctx}, fn
+      {pattern, guard, body}, {:ok, typed_acc, error_acc, running_ctx} ->
+        # Each clause starts from extended_ctx env but inherits constrained_tvars from running ctx
         bindings = extract_multi_pattern_bindings(pattern)
-        clause_ctx = %{extended_ctx | env: Enum.reduce(bindings, extended_ctx.env, fn {var, type}, e ->
-          Map.put(e, var, type)
-        end)}
+        clause_ctx = %{extended_ctx |
+          constrained_tvars: running_ctx.constrained_tvars,
+          subst: running_ctx.subst,
+          counter: running_ctx.counter,
+          row_counter: running_ctx.row_counter,
+          env: Enum.reduce(bindings, extended_ctx.env, fn {var, type}, e ->
+            Map.put(e, var, type)
+          end)
+        }
 
-        # Check guard if present
+        # Check guard if present — use expect_bool_s to track constraints
         guard_result = if guard do
           case check_s(guard, clause_ctx) do
-            {:ok, guard_type, typed_guard, _ctx} ->
-              case expect_bool(guard_type) do
-                :ok -> {:ok, typed_guard}
+            {:ok, guard_type, typed_guard, guard_ctx} ->
+              case expect_bool_s(guard_type, guard_ctx) do
+                {:ok, guard_ctx} -> {:ok, typed_guard, guard_ctx}
                 {:error, _} = err -> err
               end
             error -> error
           end
         else
-          {:ok, nil}
+          {:ok, nil, clause_ctx}
         end
 
         case guard_result do
-          {:ok, typed_guard} ->
+          {:ok, typed_guard, clause_ctx} ->
             case check_s(body, clause_ctx) do
-              {:ok, body_type, typed_body, _ctx} ->
+              {:ok, body_type, typed_body, body_ctx} ->
                 typed_pattern = type_multi_pattern(pattern, extended_ctx.env)
-                {:ok, [{typed_pattern, typed_guard, typed_body, body_type} | typed_acc], error_acc}
+                # Merge constrained_tvars back into running ctx
+                merged_ctx = %{running_ctx |
+                  constrained_tvars: merge_constrained(running_ctx.constrained_tvars, body_ctx.constrained_tvars),
+                  subst: body_ctx.subst,
+                  counter: body_ctx.counter,
+                  row_counter: body_ctx.row_counter
+                }
+                {:ok, [{typed_pattern, typed_guard, typed_body, body_type} | typed_acc], error_acc, merged_ctx}
               {:error, err} ->
-                {:ok, typed_acc, [err | error_acc]}
+                {:ok, typed_acc, [err | error_acc], running_ctx}
             end
-          {:error, err} -> {:ok, typed_acc, [err | error_acc]}
+          {:error, err} -> {:ok, typed_acc, [err | error_acc], running_ctx}
         end
     end)
 
     case typed_clauses_result do
-      {:ok, typed_clauses, []} ->
+      {:ok, typed_clauses, [], final_ctx} ->
         ret_types = Enum.map(typed_clauses, fn {_, _, _, ret_type} -> ret_type end)
         unified_ret_type = join_types_list(ret_types)
-        func_type = {:fn, param_types, unified_ret_type}
-        {:ok, func_type, {:defn_multi, name, arity, Enum.reverse(typed_clauses), func_type}, extended_ctx}
-      {:ok, _, [single_error]} ->
+        mono_type = {:fn, fresh_param_types, unified_ret_type}
+
+        scheme = TcCtx.generalize_conservative(final_ctx, mono_type, eligible_tvars)
+        ast_type = pin_constrained_tvars(mono_type, final_ctx, eligible_tvars)
+        ctx_out = %{final_ctx | constrained_tvars: saved_constrained}
+        {:ok, scheme, {:defn_multi, name, arity, Enum.reverse(typed_clauses), ast_type}, ctx_out}
+      {:ok, _, [single_error], _} ->
         {:error, single_error}
-      {:ok, _, errors} ->
+      {:ok, _, errors, _} ->
         {:error, Enum.reverse(errors)}
     end
   end
@@ -1421,6 +1452,10 @@ defmodule Vaisto.TypeChecker do
                   {:halt, err}
               end
 
+            # Built-in instance (no dictionary, operators compile directly)
+            :builtin ->
+              {:cont, {:ok, [{:class_call, class_name, method_name, instance_key, typed_args, ret_type} | acc]}}
+
             # Regular (unconstrained) instance
             methods when is_map(methods) ->
               {:cont, {:ok, [{:class_call, class_name, method_name, instance_key, typed_args, ret_type} | acc]}}
@@ -1463,6 +1498,10 @@ defmodule Vaisto.TypeChecker do
         bound_type != nil ->
           bound_key = normalize_instance_type(bound_type)
           case Map.get(instances, {c_class, bound_key}) do
+            # Built-in instance (no dictionary needed)
+            :builtin ->
+              {:cont, {:ok, acc ++ [{c_class, bound_key}]}}
+
             # Virtual instance (inside constrained instance body) — forward constraint ref
             {:virtual, vidx, _} ->
               {:cont, {:ok, acc ++ [{:constraint_ref, vidx}]}}
@@ -1764,8 +1803,19 @@ defmodule Vaisto.TypeChecker do
       {:fn, _, {:record, _, _}} = ctor_type ->
         {type, ctx} = instantiate_constructor_type_s(ctor_type, ctx)
         {:ok, type, ctx}
-      {:forall, vars, {:constrained, constraints, fn_type}} ->
-        {:ok, {:constrained_method, vars, constraints, fn_type, name}, ctx}
+      {:forall, vars, {:constrained, constraints, fn_type}} = scheme ->
+        # Check if ALL constraint classes are real (non-builtin) typeclass methods
+        classes = Map.get(ctx.env, :__classes__, %{})
+        all_real_class = Enum.all?(constraints, fn {class, _} ->
+          match?({:class, _, _, _, _}, Map.get(classes, class))
+        end)
+
+        if all_real_class do
+          {:ok, {:constrained_method, vars, constraints, fn_type, name}, ctx}
+        else
+          # Constraints include builtin classes (Num, Ord) — use normal instantiation
+          {:ok, scheme, ctx}
+        end
       {:forall, _, _} = scheme -> {:ok, scheme, ctx}
       type -> {:ok, type, ctx}
     end
@@ -2736,9 +2786,10 @@ defmodule Vaisto.TypeChecker do
   defp check_numeric_op(_op, :float, :num), do: {:ok, :num}
   defp check_numeric_op(_op, :any, t) when t in [:int, :float, :num, :any], do: {:ok, :num}
   defp check_numeric_op(_op, t, :any) when t in [:int, :float, :num, :any], do: {:ok, :num}
-  # Type variables in polymorphic contexts - return :num as the result
-  defp check_numeric_op(_op, {:tvar, _}, _), do: {:ok, :num}
-  defp check_numeric_op(_op, _, {:tvar, _}), do: {:ok, :num}
+  # Type variables in polymorphic contexts - preserve the tvar
+  defp check_numeric_op(_op, {:tvar, _} = t, {:tvar, _}), do: {:ok, t}
+  defp check_numeric_op(_op, {:tvar, _}, concrete), do: {:ok, concrete}
+  defp check_numeric_op(_op, concrete, {:tvar, _}), do: {:ok, concrete}
   defp check_numeric_op(op, t1, t2) do
     {:error, Errors.type_mismatch(:num, t1,
       hint: "`#{op}` requires numeric operands, got `#{Vaisto.TypeFormatter.format(t1)}` and `#{Vaisto.TypeFormatter.format(t2)}`")}
@@ -2746,49 +2797,85 @@ defmodule Vaisto.TypeChecker do
 
   # --- Stateful _s variants: mark tvars as constrained, then delegate ---
 
+  # Bool operators: unify tvars with :bool (concrete type, no class constraint)
   defp expect_bool_s(type, ctx) do
-    ctx = TcCtx.mark_constrained(ctx, type)
-    case expect_bool(type) do
-      :ok -> {:ok, ctx}
-      err -> err
+    case type do
+      {:tvar, _} ->
+        case TcCtx.unify(ctx, type, :bool) do
+          {:ok, ctx} -> {:ok, ctx}
+          {:error, _} -> {:error, Errors.type_mismatch(:bool, type, hint: "conditions must be boolean")}
+        end
+      _ ->
+        case expect_bool(type) do :ok -> {:ok, ctx}; err -> err end
     end
   end
 
   defp expect_bool_s(type, op, ctx) do
-    ctx = TcCtx.mark_constrained(ctx, type)
-    case expect_bool(type, op) do
-      :ok -> {:ok, ctx}
-      err -> err
+    case type do
+      {:tvar, _} ->
+        case TcCtx.unify(ctx, type, :bool) do
+          {:ok, ctx} -> {:ok, ctx}
+          {:error, _} -> {:error, Errors.type_mismatch(:bool, type, hint: "`#{op}` requires boolean operands")}
+        end
+      _ ->
+        case expect_bool(type, op) do :ok -> {:ok, ctx}; err -> err end
     end
   end
 
+  # Numeric operators: mark with :Num class constraint
   defp expect_numeric_s(type, op, ctx) do
-    ctx = TcCtx.mark_constrained(ctx, type)
+    ctx = TcCtx.mark_constrained(ctx, type, :Num)
     case expect_numeric(type, op) do
       :ok -> {:ok, ctx}
       err -> err
     end
   end
 
+  # Int operators (div/rem): unify tvars with :int (concrete type)
   defp expect_int_s(type, op, ctx) do
-    ctx = TcCtx.mark_constrained(ctx, type)
-    case expect_int(type, op) do
-      :ok -> {:ok, ctx}
-      err -> err
+    case type do
+      {:tvar, _} ->
+        case TcCtx.unify(ctx, type, :int) do
+          {:ok, ctx} -> {:ok, ctx}
+          {:error, _} -> {:error, Errors.type_mismatch(:int, type, hint: "`#{op}` requires integer operands")}
+        end
+      _ ->
+        case expect_int(type, op) do :ok -> {:ok, ctx}; err -> err end
     end
   end
 
+  # String operators: unify tvars with :string (concrete type)
   defp expect_string_s(type, op, ctx) do
-    ctx = TcCtx.mark_constrained(ctx, type)
-    case expect_string(type, op) do
+    case type do
+      {:tvar, _} ->
+        case TcCtx.unify(ctx, type, :string) do
+          {:ok, ctx} -> {:ok, ctx}
+          {:error, _} -> {:error, Errors.type_mismatch(:string, type, hint: "`#{op}` requires string operands")}
+        end
+      _ ->
+        case expect_string(type, op) do :ok -> {:ok, ctx}; err -> err end
+    end
+  end
+
+  # Ord operators (<, >, <=, >=): mark with :Ord class constraint, also accept numeric types
+  defp expect_ord_s(type, op, ctx) do
+    ctx = TcCtx.mark_constrained(ctx, type, :Ord)
+    case expect_numeric(type, op) do
       :ok -> {:ok, ctx}
       err -> err
     end
   end
 
+  # Numeric binary ops: mark both operands with :Num, unify tvars for Num a => a -> a -> a
   defp check_numeric_op_s(op, left_type, right_type, ctx) do
-    ctx = TcCtx.mark_constrained(ctx, left_type)
-    ctx = TcCtx.mark_constrained(ctx, right_type)
+    ctx = TcCtx.mark_constrained(ctx, left_type, :Num)
+    ctx = TcCtx.mark_constrained(ctx, right_type, :Num)
+    # When both are tvars, unify them (same Num type)
+    ctx = case {left_type, right_type} do
+      {{:tvar, _}, {:tvar, _}} ->
+        case TcCtx.unify(ctx, left_type, right_type) do {:ok, c} -> c; _ -> ctx end
+      _ -> ctx
+    end
     case check_numeric_op(op, left_type, right_type) do
       {:ok, result_type} -> {:ok, result_type, ctx}
       err -> err
@@ -2849,6 +2936,42 @@ defmodule Vaisto.TypeChecker do
       {:error, _} = err -> err
     end
   end
+
+  # Verify that builtin class constraints (Num, Ord) are satisfied after unification
+  defp verify_builtin_constraints(ctx) do
+    instances = Map.get(ctx.env, :__instances__, %{})
+    builtin_classes = [:Num, :Ord]
+
+    {remaining, result} = Enum.reduce_while(ctx.constraints, {[], {:ok, ctx}}, fn
+      {class, type} = constraint, {remaining, {:ok, acc}} ->
+        if class in builtin_classes do
+          resolved = TcCtx.apply_subst(acc, type)
+          case resolved do
+            {:tvar, _} ->
+              # Unresolved, keep for later
+              {:cont, {[constraint | remaining], {:ok, acc}}}
+            concrete ->
+              key = normalize_constraint_type(concrete)
+              if Map.has_key?(instances, {class, key}) do
+                {:cont, {remaining, {:ok, acc}}}
+              else
+                {:halt, {remaining, {:error, Errors.no_instance_for_type(class, concrete)}}}
+              end
+          end
+        else
+          {:cont, {[constraint | remaining], {:ok, acc}}}
+        end
+    end)
+
+    case result do
+      {:ok, ctx} -> {:ok, %{ctx | constraints: Enum.reverse(remaining)}}
+      error -> error
+    end
+  end
+
+  defp normalize_constraint_type(:num), do: :num
+  defp normalize_constraint_type(t) when is_atom(t), do: t
+  defp normalize_constraint_type(_), do: :unknown
 
   defp unify_call_poly_s({:fn, expected_args, ret_type}, actual_args, ctx, original_args, func_name) do
     display_name = format_func_name(func_name)
@@ -3351,8 +3474,8 @@ defmodule Vaisto.TypeChecker do
       {:defn, name, _params, _body, _func_type, _guard} ->
         Map.put(env, name, check_type || elem(typed_form, 4))
 
-      {:defn_multi, name, _arity, _clauses, func_type} ->
-        Map.put(env, name, func_type)
+      {:defn_multi, name, _arity, _clauses, _func_type} ->
+        Map.put(env, name, check_type || elem(typed_form, 4))
 
       {:extern, mod, func, func_type} ->
         # Extern already registered in first pass, but keep in typed forms
@@ -3443,13 +3566,25 @@ defmodule Vaisto.TypeChecker do
     end)
   end
 
-  # Pin constrained tvars back to :any in a type (for typed AST)
-  defp pin_constrained_tvars(type, %TcCtx{constrained_tvars: constrained, subst: subst}) do
-    pin_subst = constrained
+  # Apply substitution to type for typed AST.
+  # Non-eligible constrained tvars are pinned to :any (they can't be quantified).
+  # Eligible constrained tvars (Num, Ord) stay as tvars in the typed AST.
+  defp pin_constrained_tvars(type, %TcCtx{subst: subst, constrained_tvars: constrained}, eligible_tvars) do
+    non_eligible_constrained = constrained
+      |> Map.keys()
+      |> Enum.reject(&MapSet.member?(eligible_tvars, &1))
+
+    pin_subst = non_eligible_constrained
       |> Enum.map(fn id -> {id, :any} end)
       |> Map.new()
+
     merged = Map.merge(subst, pin_subst)
     Vaisto.TypeSystem.Core.apply_subst(merged, type)
+  end
+
+  # Merge two constrained_tvars maps (Map of id → MapSet of classes)
+  defp merge_constrained(a, b) do
+    Map.merge(a, b, fn _id, classes_a, classes_b -> MapSet.union(classes_a, classes_b) end)
   end
 
   # ============================================================================

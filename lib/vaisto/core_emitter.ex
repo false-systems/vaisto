@@ -519,6 +519,13 @@ defmodule Vaisto.CoreEmitter do
   # If the variable is a zero-arity user function (defval), call it
   # Explicit function reference - module-level function passed as value
   # Creates a wrapper function: fun(X1, ...) -> name(X1, ...) end
+  defp to_core_expr({:fn_ref, :cons, 2, _type}, _user_fns, _local_vars) do
+    # cons as a first-class function: fun(H, T) -> [H | T] end
+    h = :cerl.c_var(:__h__)
+    t = :cerl.c_var(:__t__)
+    :cerl.c_fun([h, t], :cerl.c_cons(h, t))
+  end
+
   defp to_core_expr({:fn_ref, name, arity, _type}, user_fns, _local_vars) do
     if MapSet.member?(user_fns, {name, arity}) do
       # Create wrapper function: fun(X1, X2, ...) -> name(X1, X2, ...) end
