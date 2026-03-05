@@ -821,18 +821,7 @@ defmodule Vaisto.Parser do
     {pattern, nil, body}
   end
 
-  # Check if params list looks like typed pairs (alternating names and types)
-  # Types come from tokenizer as {:atom, :int} wrapped form
-  defp looks_typed?(params) when length(params) >= 2 do
-    # If second element is a type (either wrapped {:atom, :type} or raw :type), it's typed
-    params
-    |> Enum.drop(1)
-    |> Enum.take_every(2)
-    |> Enum.all?(&is_type_annotation?/1)
-  end
-  defp looks_typed?(_), do: false
-
-  # Basic types
+  # Type annotation checks for param parsing
   defp is_type_annotation?({:atom, t}) when t in [:int, :float, :num, :string, :bool, :any, :atom, :unit], do: true
   defp is_type_annotation?(t) when is_atom(t) and t in [:int, :float, :num, :string, :bool, :any, :atom, :unit], do: true
   # Parameterized types: (List :int), (Result :int :string)
@@ -846,16 +835,23 @@ defmodule Vaisto.Parser do
   defp unwrap_type({:atom, t}), do: t
   defp unwrap_type(t), do: t
 
-  # Helper to parse typed or untyped params
+  # Left-to-right greedy scan: each param name optionally followed by a type annotation.
+  # Supports mixed typed/untyped: [n :int xs] → [{:n, :int}, {:xs, :any}]
   defp parse_typed_params(params) do
-    if looks_typed?(params) do
-      # Parse as pairs: [x :int y :int] → [{:x, :int}, {:y, :int}]
-      params
-      |> Enum.chunk_every(2)
-      |> Enum.map(fn [param_name, type] -> {param_name, unwrap_type(type)} end)
-    else
-      # Untyped params: [x y] → [{:x, :any}, {:y, :any}]
-      Enum.map(params, fn p -> {p, :any} end)
+    parse_typed_params_acc(params, [])
+  end
+
+  defp parse_typed_params_acc([], acc), do: Enum.reverse(acc)
+  defp parse_typed_params_acc([name | rest], acc) do
+    case rest do
+      [maybe_type | tail] ->
+        if is_type_annotation?(maybe_type) do
+          parse_typed_params_acc(tail, [{name, unwrap_type(maybe_type)} | acc])
+        else
+          parse_typed_params_acc(rest, [{name, :any} | acc])
+        end
+      [] ->
+        Enum.reverse([{name, :any} | acc])
     end
   end
 

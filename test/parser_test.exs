@@ -148,6 +148,23 @@ defmodule Vaisto.ParserTest do
     end
   end
 
+  describe "mixed typed/untyped params" do
+    test "all typed params still work" do
+      ast = Parser.parse("(defn add [x :int y :int] :int (+ x y))")
+      assert {:defn, :add, [{:x, :int}, {:y, :int}], _body, :int, _loc} = ast
+    end
+
+    test "mixed typed and untyped params" do
+      ast = Parser.parse("(defn f [n :int xs] n)")
+      assert {:defn, :f, [{:n, :int}, {:xs, :any}], _body, :any, _loc} = ast
+    end
+
+    test "trailing untyped after typed" do
+      ast = Parser.parse("(defn g [a :string b c :int] a)")
+      assert {:defn, :g, [{:a, :string}, {:b, :any}, {:c, :int}], _body, :any, _loc} = ast
+    end
+  end
+
   describe "error messages with locations" do
     test "unclosed parenthesis reports location" do
       code = "(+ 1 2"

@@ -1210,4 +1210,121 @@ defmodule Vaisto.TypeClassTest do
       assert err.hint =~ "constraints must reference"
     end
   end
+
+  # =========================================================================
+  # Elixir Backend — Typeclass Runtime
+  # =========================================================================
+
+  describe "elixir backend: built-in Eq" do
+    test "eq on ints" do
+      {:ok, mod} = Runner.compile_and_load("(eq 1 1)", :EqIntElxB, backend: :elixir)
+      assert true == Runner.call(mod, :main)
+    end
+
+    test "neq on ints" do
+      {:ok, mod} = Runner.compile_and_load("(neq 1 2)", :NeqIntElxB, backend: :elixir)
+      assert true == Runner.call(mod, :main)
+    end
+
+    test "eq on strings" do
+      {:ok, mod} = Runner.compile_and_load(~s|(eq "hello" "hello")|, :EqStrElxB, backend: :elixir)
+      assert true == Runner.call(mod, :main)
+    end
+
+    test "eq on bools" do
+      {:ok, mod} = Runner.compile_and_load("(eq true true)", :EqBoolElxB, backend: :elixir)
+      assert true == Runner.call(mod, :main)
+    end
+  end
+
+  describe "elixir backend: built-in Show" do
+    test "show int" do
+      {:ok, mod} = Runner.compile_and_load("(show 42)", :ShowIntElxB, backend: :elixir)
+      assert "42" == Runner.call(mod, :main)
+    end
+
+    test "show string" do
+      {:ok, mod} = Runner.compile_and_load(~s|(show "hi")|, :ShowStrElxB, backend: :elixir)
+      assert "hi" == Runner.call(mod, :main)
+    end
+
+    test "show bool" do
+      {:ok, mod} = Runner.compile_and_load("(show true)", :ShowBoolElxB, backend: :elixir)
+      assert "true" == Runner.call(mod, :main)
+    end
+  end
+
+  describe "elixir backend: ADT instance" do
+    test "eq on ADT true" do
+      code = """
+      (deftype Color (Red) (Green) (Blue))
+      (instance Eq Color
+        (eq [x y] (== x y)))
+      (eq (Red) (Red))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :AdtEqTrueElxB, backend: :elixir)
+      assert true == Runner.call(mod, :main)
+    end
+
+    test "eq on ADT false" do
+      code = """
+      (deftype Color (Red) (Green) (Blue))
+      (instance Eq Color
+        (eq [x y] (== x y)))
+      (eq (Red) (Blue))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :AdtEqFalseElxB, backend: :elixir)
+      assert false == Runner.call(mod, :main)
+    end
+  end
+
+  describe "elixir backend: default methods" do
+    test "neq via default eq" do
+      code = """
+      (deftype Color (Red) (Green) (Blue))
+      (instance Eq Color
+        (eq [x y] (== x y)))
+      (neq (Red) (Blue))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :AdtNeqDefElxB, backend: :elixir)
+      assert true == Runner.call(mod, :main)
+    end
+
+    test "neq via derived eq" do
+      code = """
+      (deftype Color (Red) (Green) (Blue) deriving [Eq])
+      (neq (Red) (Red))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :DerNeqDefElxB, backend: :elixir)
+      assert false == Runner.call(mod, :main)
+    end
+  end
+
+  describe "elixir backend: constrained instance" do
+    test "Show Maybe Just" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (instance Show (Maybe a) where [(Show a)]
+        (show [x] (match x
+          [(Just v) (str "Just(" (show v) ")")]
+          [(Nothing) "Nothing"])))
+      (show (Just 42))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :ShowMaybeJustElxB, backend: :elixir)
+      assert "Just(42)" == Runner.call(mod, :main)
+    end
+
+    test "Show Maybe Nothing" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (instance Show (Maybe a) where [(Show a)]
+        (show [x] (match x
+          [(Just v) (str "Just(" (show v) ")")]
+          [(Nothing) "Nothing"])))
+      (show (Nothing))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :ShowMaybeNothElxB, backend: :elixir)
+      assert "Nothing" == Runner.call(mod, :main)
+    end
+  end
 end
