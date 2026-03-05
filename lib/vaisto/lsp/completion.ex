@@ -88,6 +88,14 @@ defmodule Vaisto.LSP.Completion do
     {"fold", "Fold/reduce list", "(fold f init xs) → value", [{:fn, [:any, :any], :any}, :any, {:list, :any}], :any},
     {"flat_map", "Flat map over list", "(flat_map f xs) → list", [{:fn, [:any], {:list, :any}}, {:list, :any}], {:list, :any}},
 
+    # Predicate
+    {"empty?", "Check if list is empty", "(empty? xs) → Bool", [{:list, :any}], :bool},
+
+    # Type class operations
+    {"show", "Convert to string (Show)", "(show x) → String", [:any], :string},
+    {"eq", "Equality (Eq)", "(eq a b) → Bool", [:any, :any], :bool},
+    {"neq", "Inequality (Eq)", "(neq a b) → Bool", [:any, :any], :bool},
+
     # String operations
     {"str", "String concatenation/conversion", "(str a b c) → string", [:any], :string},
 

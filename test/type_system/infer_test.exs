@@ -34,8 +34,7 @@ defmodule Vaisto.TypeSystem.InferTest do
     end
 
     test "errors on undefined variable" do
-      assert {:error, msg} = Infer.infer({:var, :unknown})
-      assert msg =~ "Undefined variable"
+      assert {:error, %Vaisto.Error{message: "undefined variable"}} = Infer.infer({:var, :unknown})
     end
 
     test "bare atom as variable" do
@@ -67,8 +66,7 @@ defmodule Vaisto.TypeSystem.InferTest do
     end
 
     test "errors on unknown function" do
-      assert {:error, msg} = Infer.infer({:call, :unknown_fn, [1]})
-      assert msg =~ "Unknown function"
+      assert {:error, %Vaisto.Error{message: "unknown function"}} = Infer.infer({:call, :unknown_fn, [1]})
     end
 
     test "infers comparison operators" do

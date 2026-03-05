@@ -362,6 +362,34 @@ defmodule Vaisto.LSP.Hover do
     find_var_type(body, search_name)
   end
 
+  # Match expression
+  defp find_var_type({:match, expr, clauses, _type}, name) do
+    case find_var_type(expr, name) do
+      {:ok, _} = found -> found
+      :not_found -> Enum.find_value(clauses, :not_found, fn {pat, body, _} ->
+        case find_var_type(pat, name) do {:ok, _} = f -> f; _ -> find_var_type(body, name) end
+      end)
+    end
+  end
+
+  # Multi-clause defn
+  defp find_var_type({:defn_multi, _name, _arity, clauses, _type}, search_name) do
+    Enum.find_value(clauses, :not_found, fn clause ->
+      body = elem(clause, tuple_size(clause) - 2)
+      find_var_type(body, search_name)
+    end)
+  end
+
+  # List literal
+  defp find_var_type({:list, elements, _type}, name), do: find_in_list(elements, name)
+
+  # Tuple literal
+  defp find_var_type({:tuple, elements, _type}, name), do: find_in_list(elements, name)
+
+  # Field access
+  defp find_var_type({:field_access, expr, _field, _type}, name), do: find_var_type(expr, name)
+  defp find_var_type({:field_access, expr, _f, _ft, _rt}, name), do: find_var_type(expr, name)
+
   # List: search all elements
   defp find_var_type(list, name) when is_list(list) do
     find_in_list(list, name)

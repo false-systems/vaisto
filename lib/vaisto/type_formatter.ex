@@ -100,6 +100,31 @@ defmodule Vaisto.TypeFormatter do
     "{#{field_str} | #{format(tail)}}"
   end
 
+  # Forall with constraints — "Num a => (a) -> a"
+  def format({:forall, vars, {:constrained, constraints, type}}) do
+    names = tvar_name_map(vars)
+    constraint_str = constraints
+      |> Enum.map(fn {class, {:tvar, id}} -> "#{class} #{Map.get(names, id, "t#{id}")}" end)
+      |> Enum.join(", ")
+    "#{constraint_str} => #{format_with_names(type, names)}"
+  end
+
+  # Forall without constraints — "forall a, b. (a) -> b"
+  def format({:forall, vars, type}) do
+    names = tvar_name_map(vars)
+    var_str = vars |> Enum.map(&Map.get(names, &1, "t#{&1}")) |> Enum.join(", ")
+    "forall #{var_str}. #{format_with_names(type, names)}"
+  end
+
+  # Standalone constrained (defensive)
+  def format({:constrained, constraints, type}) do
+    names = type |> collect_tvar_ids() |> Enum.uniq() |> tvar_name_map()
+    constraint_str = constraints
+      |> Enum.map(fn {class, {:tvar, id}} -> "#{class} #{Map.get(names, id, "t#{id}")}" end)
+      |> Enum.join(", ")
+    "#{constraint_str} => #{format_with_names(type, names)}"
+  end
+
   # Generic fallback for atoms (type names)
   def format(other) when is_atom(other), do: "#{other}"
 
@@ -130,4 +155,24 @@ defmodule Vaisto.TypeFormatter do
   @spec format_annotation(term()) :: String.t()
   def format_annotation(type) when is_atom(type), do: ":#{type}"
   def format_annotation(type), do: format(type)
+
+  # Private helpers for named type variable formatting
+
+  defp tvar_name_map(var_ids) do
+    var_ids |> Enum.with_index() |> Map.new(fn {id, idx} -> {id, <<(?a + idx)::utf8>>} end)
+  end
+
+  defp format_with_names({:tvar, id}, names), do: Map.get(names, id, "t#{id}")
+  defp format_with_names({:fn, args, ret}, names) do
+    arg_str = args |> Enum.map(&format_with_names(&1, names)) |> Enum.join(", ")
+    "(#{arg_str}) -> #{format_with_names(ret, names)}"
+  end
+  defp format_with_names({:list, elem}, names), do: "List(#{format_with_names(elem, names)})"
+  defp format_with_names({:rvar, id}, names), do: Map.get(names, id, "r#{id}")
+  defp format_with_names(other, _names), do: format(other)
+
+  defp collect_tvar_ids({:tvar, id}), do: [id]
+  defp collect_tvar_ids({:fn, args, ret}), do: Enum.flat_map(args, &collect_tvar_ids/1) ++ collect_tvar_ids(ret)
+  defp collect_tvar_ids({:list, e}), do: collect_tvar_ids(e)
+  defp collect_tvar_ids(_), do: []
 end

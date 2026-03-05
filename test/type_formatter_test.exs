@@ -146,6 +146,40 @@ defmodule Vaisto.TypeFormatterTest do
     end
   end
 
+  describe "format/1 forall types" do
+    test "formats simple forall" do
+      type = {:forall, [0], {:fn, [{:tvar, 0}, {:tvar, 0}], :bool}}
+      assert TypeFormatter.format(type) == "forall a. (a, a) -> Bool"
+    end
+
+    test "formats forall with two vars" do
+      type = {:forall, [0, 1], {:fn, [{:tvar, 0}], {:tvar, 1}}}
+      assert TypeFormatter.format(type) == "forall a, b. (a) -> b"
+    end
+
+    test "formats forall with constrained body" do
+      type = {:forall, [0], {:constrained, [{:Eq, {:tvar, 0}}], {:fn, [{:tvar, 0}, {:tvar, 0}], :bool}}}
+      assert TypeFormatter.format(type) == "Eq a => (a, a) -> Bool"
+    end
+
+    test "formats forall with multiple constraints" do
+      type = {:forall, [0], {:constrained, [{:Eq, {:tvar, 0}}, {:Show, {:tvar, 0}}], {:fn, [{:tvar, 0}], :string}}}
+      assert TypeFormatter.format(type) == "Eq a, Show a => (a) -> String"
+    end
+
+    test "formats forall with list return type" do
+      type = {:forall, [0], {:fn, [{:list, {:tvar, 0}}], {:tvar, 0}}}
+      assert TypeFormatter.format(type) == "forall a. (List(a)) -> a"
+    end
+  end
+
+  describe "format/1 standalone constrained" do
+    test "formats constrained type without forall" do
+      type = {:constrained, [{:Num, {:tvar, 0}}], {:fn, [{:tvar, 0}, {:tvar, 0}], {:tvar, 0}}}
+      assert TypeFormatter.format(type) == "Num a => (a, a) -> a"
+    end
+  end
+
   describe "format/1 fallbacks" do
     test "formats unknown atom as string" do
       assert TypeFormatter.format(:custom_type) == "custom_type"

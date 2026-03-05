@@ -70,6 +70,7 @@ defmodule Vaisto.TypeEnv do
       {:Show, :float} => %{show: {:fn, [:float], :string}},
       {:Show, :string} => %{show: {:fn, [:string], :string}},
       {:Show, :bool} => %{show: {:fn, [:bool], :string}},
+      {:Show, :atom} => %{show: {:fn, [:atom], :string}},
       # Built-in Num instances (no dictionary, operators compile directly)
       {:Num, :int} => :builtin,
       {:Num, :float} => :builtin,

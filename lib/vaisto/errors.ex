@@ -218,6 +218,12 @@ defmodule Vaisto.Errors do
     )
   end
 
+  @doc "Non-exhaustive pattern match on Bool"
+  def non_exhaustive_bool(missing, opts \\ []) do
+    Error.new("non-exhaustive pattern match on Bool",
+      Keyword.merge(opts, [hint: "missing: #{missing}"]))
+  end
+
   @doc "Non-exhaustive pattern match on result tuples"
   def non_exhaustive_result(missing_tags, opts \\ []) do
     missing_str = missing_tags |> Enum.map(&":#{&1}") |> Enum.join(", ")

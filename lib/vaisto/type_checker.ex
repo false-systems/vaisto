@@ -2037,7 +2037,27 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
+  defp check_exhaustiveness(clauses, :bool) do
+    has_catch_all = Enum.any?(clauses, fn {pattern, _body} -> is_catch_all_pattern?(pattern) end)
+    if has_catch_all do
+      :ok
+    else
+      covered = clauses
+        |> Enum.map(fn {pattern, _body} -> extract_bool_literal(pattern) end)
+        |> Enum.reject(&is_nil/1)
+        |> MapSet.new()
+      missing = MapSet.difference(MapSet.new([true, false]), covered)
+      if MapSet.size(missing) == 0, do: :ok,
+      else: {:error, Errors.non_exhaustive_bool(missing |> MapSet.to_list() |> Enum.join(", "))}
+    end
+  end
+
   defp check_exhaustiveness(_clauses, _expr_type), do: :ok
+
+  defp extract_bool_literal(true), do: true
+  defp extract_bool_literal(false), do: false
+  defp extract_bool_literal({:lit, :bool, v}), do: v
+  defp extract_bool_literal(_), do: nil
 
   # As-pattern: (x @ (Ok v)) parses as {:call, x, [:@, inner], loc}
   defp extract_variant_name({:call, var, [:@, inner], _loc}) when is_atom(var), do: extract_variant_name(inner)
@@ -2971,6 +2991,12 @@ defmodule Vaisto.TypeChecker do
 
   defp normalize_constraint_type(:num), do: :num
   defp normalize_constraint_type(t) when is_atom(t), do: t
+  defp normalize_constraint_type({:list, _}), do: :list
+  defp normalize_constraint_type({:tuple, _}), do: :tuple
+  defp normalize_constraint_type({:sum, name, _}), do: name
+  defp normalize_constraint_type({:record, name, _}), do: name
+  defp normalize_constraint_type({:fn, _, _}), do: :fn
+  defp normalize_constraint_type({:pid, name, _}), do: name
   defp normalize_constraint_type(_), do: :unknown
 
   defp unify_call_poly_s({:fn, expected_args, ret_type}, actual_args, ctx, original_args, func_name) do

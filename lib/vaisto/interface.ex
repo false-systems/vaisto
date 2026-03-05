@@ -184,6 +184,7 @@ defmodule Vaisto.Interface do
     type_env
     |> Enum.filter(fn
       {_name, {:fn, _, _}} -> true
+      {_name, {:forall, _, _}} -> true
       _ -> false
     end)
     |> Map.new()

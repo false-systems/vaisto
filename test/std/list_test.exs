@@ -92,8 +92,6 @@ defmodule Vaisto.Std.ListTest do
   end
 
   describe "append" do
-    @tag :skip
-    # Language limitation: cons is a special form, cannot be passed as first-class function to fold-right
     test "append two lists" do
       source = """
       (import Std.List)
@@ -103,8 +101,6 @@ defmodule Vaisto.Std.ListTest do
       assert Runner.call(mod, :main) == [1, 2, 3, 4]
     end
 
-    @tag :skip
-    # Language limitation: cons is a special form, cannot be passed as first-class function to fold-right
     test "append with empty list" do
       source = """
       (import Std.List)

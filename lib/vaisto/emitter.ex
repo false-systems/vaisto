@@ -495,6 +495,122 @@ defmodule Vaisto.Emitter do
     {{:., [], [func_ast]}, [], args_ast}
   end
 
+  # --- Type class support ---
+
+  # Class call (6-tuple, unconstrained): built-in Eq/Show on primitives inline directly
+  def to_elixir({:class_call, :Eq, :eq, concrete_type, [left, right], _type})
+      when concrete_type in [:int, :float, :string, :bool, :atom] do
+    {:==, [], [to_elixir(left), to_elixir(right)]}
+  end
+
+  def to_elixir({:class_call, :Eq, :neq, concrete_type, [left, right], _type})
+      when concrete_type in [:int, :float, :string, :bool, :atom] do
+    {:!=, [], [to_elixir(left), to_elixir(right)]}
+  end
+
+  def to_elixir({:class_call, :Show, :show, :int, [arg], _type}) do
+    quote do: Integer.to_string(unquote(to_elixir(arg)))
+  end
+
+  def to_elixir({:class_call, :Show, :show, :float, [arg], _type}) do
+    quote do: Float.to_string(unquote(to_elixir(arg)))
+  end
+
+  def to_elixir({:class_call, :Show, :show, :string, [arg], _type}) do
+    to_elixir(arg)
+  end
+
+  def to_elixir({:class_call, :Show, :show, :bool, [arg], _type}) do
+    quote do: Atom.to_string(unquote(to_elixir(arg)))
+  end
+
+  def to_elixir({:class_call, :Show, :show, :atom, [arg], _type}) do
+    quote do: Atom.to_string(unquote(to_elixir(arg)))
+  end
+
+  # User-defined instance (unconstrained): call dict function, extract method by index
+  def to_elixir({:class_call, class_name, method_name, concrete_type, args, _type}) do
+    dict_fn = dict_function_name(class_name, concrete_type)
+    method_index = get_method_index(class_name, method_name)
+    arg_asts = Enum.map(args, &to_elixir/1)
+    dict_call = {dict_fn, [], []}
+    quote do
+      elem(unquote(dict_call), unquote(method_index - 1)).(unquote_splicing(arg_asts))
+    end
+  end
+
+  # Constrained class call (7-tuple): pass constraint dicts to dict function
+  def to_elixir({:class_call, class_name, method_name, concrete_type, args, _type, resolved_constraints}) do
+    dict_fn = dict_function_name(class_name, concrete_type)
+    method_index = get_method_index(class_name, method_name)
+    arg_asts = Enum.map(args, &to_elixir/1)
+    constraint_dict_asts = Enum.map(resolved_constraints, &build_constraint_dict_elixir/1)
+    dict_call = {dict_fn, [], constraint_dict_asts}
+    quote do
+      elem(unquote(dict_call), unquote(method_index - 1)).(unquote_splicing(arg_asts))
+    end
+  end
+
+  # Constraint call: inside constrained instance body, dispatch via constraint dict param
+  def to_elixir({:constraint_call, idx, method_name, args, _type}) do
+    dict_var = Macro.var(:"__constraint_#{idx}", nil)
+    method_index = get_method_index_for_constraint_call(method_name, idx)
+    arg_asts = Enum.map(args, &to_elixir/1)
+    quote do
+      elem(unquote(dict_var), unquote(method_index - 1)).(unquote_splicing(arg_asts))
+    end
+  end
+
+  # defclass: type-level only, no runtime code
+  def to_elixir({:defclass, _, _, _, _}), do: nil
+
+  # Instance (unconstrained): generate dict function
+  def to_elixir({:instance, class_name, for_type, methods, _type}) do
+    dict_fn = dict_function_name(class_name, for_type)
+    method_closures = Enum.map(methods, fn {_method_name, params, typed_body} ->
+      param_vars = Enum.map(params, &Macro.var(&1, nil))
+      body_ast = to_elixir(typed_body)
+      {:fn, [], [{:->, [], [param_vars, body_ast]}]}
+    end)
+    dict_tuple = {:{}, [], method_closures}
+    quote do
+      def unquote(dict_fn)() do
+        unquote(dict_tuple)
+      end
+    end
+  end
+
+  # Instance (constrained): dict function takes constraint dict params
+  def to_elixir({:instance_constrained, class_name, for_type, _type_params, constraints, methods, _type}) do
+    dict_fn = dict_function_name(class_name, for_type)
+
+    # Store constraint-to-class mapping for constraint_call resolution
+    constraint_classes = constraints
+      |> Enum.with_index()
+      |> Map.new(fn {{c_class, _c_tvar}, idx} -> {idx, c_class} end)
+    Process.put(:__vaisto_constraint_classes__, constraint_classes)
+
+    try do
+      constraint_params = Enum.with_index(constraints) |> Enum.map(fn {_, idx} ->
+        Macro.var(:"__constraint_#{idx}", nil)
+      end)
+
+      method_closures = Enum.map(methods, fn {_method_name, params, typed_body} ->
+        param_vars = Enum.map(params, &Macro.var(&1, nil))
+        body_ast = to_elixir(typed_body)
+        {:fn, [], [{:->, [], [param_vars, body_ast]}]}
+      end)
+      dict_tuple = {:{}, [], method_closures}
+      quote do
+        def unquote(dict_fn)(unquote_splicing(constraint_params)) do
+          unquote(dict_tuple)
+        end
+      end
+    after
+      Process.delete(:__vaisto_constraint_classes__)
+    end
+  end
+
   # Generic function call
   def to_elixir({:call, func, args, _type}) do
     {func, [], Enum.map(args, &to_elixir/1)}
@@ -654,7 +770,30 @@ defmodule Vaisto.Emitter do
 
   # Private helpers
 
-  defp compile_module(module_ast, module_name) do
+  defp compile_module({:module, forms} = module_ast, module_name) do
+    # Extract user-defined class definitions for method index lookups
+    user_classes = forms
+      |> Enum.filter(fn
+        {:defclass, _, _, _, _} -> true
+        _ -> false
+      end)
+      |> Map.new(fn {:defclass, class_name, _params, methods, _type} ->
+        method_sigs = Enum.map(methods, fn
+          {name, _params, _ret_type, _body} -> {name, :any}
+          {name, _params, _ret_type} -> {name, :any}
+        end)
+        {class_name, {:class, class_name, [], method_sigs, %{}}}
+      end)
+    Process.put(:__vaisto_user_classes__, user_classes)
+
+    try do
+      compile_module_inner(module_ast, module_name)
+    after
+      Process.delete(:__vaisto_user_classes__)
+    end
+  end
+
+  defp compile_module_inner(module_ast, module_name) do
     elixir_asts = to_elixir(module_ast)
 
     # Separate standalone modules (GenServers, Supervisors) from function defs
@@ -947,6 +1086,92 @@ defmodule Vaisto.Emitter do
       _ ->
         base_name
     end
+  end
+
+  # --- Typeclass helpers ---
+
+  defp dict_function_name(class_name, concrete_type) do
+    :"__dict_#{class_name}_#{concrete_type}"
+  end
+
+  defp get_method_index(class_name, method_name) do
+    builtin_classes = Vaisto.TypeEnv.primitives()[:__classes__] || %{}
+    user_classes = Process.get(:__vaisto_user_classes__, %{})
+    classes = Map.merge(builtin_classes, user_classes)
+    methods = case Map.get(classes, class_name) do
+      {:class, _, _, methods, _defaults} -> methods
+      {:class, _, _, methods} -> methods
+      _ -> []
+    end
+    case Enum.find_index(methods, fn {name, _} -> name == method_name end) do
+      nil -> 1
+      idx -> idx + 1
+    end
+  end
+
+  defp get_method_index_for_constraint_call(method_name, idx) do
+    constraint_classes = Process.get(:__vaisto_constraint_classes__, %{})
+    case Map.get(constraint_classes, idx) do
+      nil -> 1
+      class_name -> get_method_index(class_name, method_name)
+    end
+  end
+
+  defp build_constraint_dict_elixir({:constraint_ref, idx}) do
+    Macro.var(:"__constraint_#{idx}", nil)
+  end
+
+  defp build_constraint_dict_elixir({:constrained_ref, c_class, c_type, sub_constraints}) do
+    sub_dicts = Enum.map(sub_constraints, &build_constraint_dict_elixir/1)
+    dict_fn = dict_function_name(c_class, c_type)
+    {dict_fn, [], sub_dicts}
+  end
+
+  defp build_constraint_dict_elixir({c_class, c_type}) do
+    build_inline_constraint_dict(c_class, c_type)
+  end
+
+  defp build_inline_constraint_dict(:Eq, t) when t in [:int, :float, :string, :bool, :atom] do
+    x = Macro.var(:__eq_x, nil)
+    y = Macro.var(:__eq_y, nil)
+    eq_fn = {:fn, [], [{:->, [], [[x, y], {:==, [], [x, y]}]}]}
+    neq_fn = {:fn, [], [{:->, [], [[x, y], {:!=, [], [x, y]}]}]}
+    {:{}, [], [eq_fn, neq_fn]}
+  end
+
+  defp build_inline_constraint_dict(:Show, :int) do
+    x = Macro.var(:__show_x, nil)
+    show_fn = {:fn, [], [{:->, [], [[x], quote(do: Integer.to_string(unquote(x)))]}]}
+    {:{}, [], [show_fn]}
+  end
+
+  defp build_inline_constraint_dict(:Show, :float) do
+    x = Macro.var(:__show_x, nil)
+    show_fn = {:fn, [], [{:->, [], [[x], quote(do: Float.to_string(unquote(x)))]}]}
+    {:{}, [], [show_fn]}
+  end
+
+  defp build_inline_constraint_dict(:Show, :string) do
+    x = Macro.var(:__show_x, nil)
+    show_fn = {:fn, [], [{:->, [], [[x], x]}]}
+    {:{}, [], [show_fn]}
+  end
+
+  defp build_inline_constraint_dict(:Show, t) when t in [:bool, :atom] do
+    x = Macro.var(:__show_x, nil)
+    show_fn = {:fn, [], [{:->, [], [[x], quote(do: Atom.to_string(unquote(x)))]}]}
+    {:{}, [], [show_fn]}
+  end
+
+  defp build_inline_constraint_dict(_class, :any) do
+    x = Macro.var(:__dummy_x, nil)
+    dummy_fn = {:fn, [], [{:->, [], [[x], x]}]}
+    {:{}, [], [dummy_fn]}
+  end
+
+  defp build_inline_constraint_dict(class_name, concrete_type) do
+    dict_fn = dict_function_name(class_name, concrete_type)
+    {dict_fn, [], []}
   end
 
 end

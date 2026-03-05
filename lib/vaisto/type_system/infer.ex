@@ -18,6 +18,7 @@ defmodule Vaisto.TypeSystem.Infer do
       (fn [x] (+ x 1)) → infers {:fn, [:int], :int}
   """
 
+  alias Vaisto.Errors
   alias Vaisto.TypeSystem.Context
   alias Vaisto.TypeSystem.Core
 
@@ -94,7 +95,7 @@ defmodule Vaisto.TypeSystem.Infer do
         {:ok, type, var_or_fn_ref(name, type), ctx}
 
       :error ->
-        {:error, "Undefined variable: #{name}"}
+        {:error, Errors.undefined_variable(name)}
     end
   end
 
@@ -345,7 +346,7 @@ defmodule Vaisto.TypeSystem.Infer do
         infer_application(func, func_type, args, ctx)
 
       :error ->
-        {:error, "Unknown function: #{func}"}
+        {:error, Errors.unknown_function(func)}
     end
   end
 
@@ -602,7 +603,7 @@ defmodule Vaisto.TypeSystem.Infer do
   # Fall back to the original type checker for complex forms
 
   defp infer_expr(other, _ctx) do
-    {:error, "Inference not implemented for: #{inspect(other)}"}
+    {:error, Errors.unknown_expression(other, hint: "inference not implemented for this form")}
   end
 
   # --- Helpers ---
