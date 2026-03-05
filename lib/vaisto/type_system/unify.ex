@@ -234,17 +234,23 @@ defmodule Vaisto.TypeSystem.Unify do
   @doc """
   Unifies sum type variants pairwise by constructor name and field types.
   """
-  def unify_variant_fields([], [], subst, rc), do: {:ok, subst, rc}
-  def unify_variant_fields([{name, types1} | r1], [{name, types2} | r2], subst, rc) do
+  def unify_variant_fields(v1, v2, subst, rc) do
+    sorted1 = Enum.sort_by(v1, fn {name, _} -> name end)
+    sorted2 = Enum.sort_by(v2, fn {name, _} -> name end)
+    unify_variant_fields_sorted(sorted1, sorted2, subst, rc)
+  end
+
+  defp unify_variant_fields_sorted([], [], subst, rc), do: {:ok, subst, rc}
+  defp unify_variant_fields_sorted([{name, types1} | r1], [{name, types2} | r2], subst, rc) do
     case unify_lists(types1, types2, subst, rc) do
-      {:ok, subst, rc} -> unify_variant_fields(r1, r2, subst, rc)
+      {:ok, subst, rc} -> unify_variant_fields_sorted(r1, r2, subst, rc)
       error -> error
     end
   end
-  def unify_variant_fields([{n1, _} | _], [{n2, _} | _], _subst, _rc) do
+  defp unify_variant_fields_sorted([{n1, _} | _], [{n2, _} | _], _subst, _rc) do
     {:error, "variant mismatch: #{n1} vs #{n2}"}
   end
-  def unify_variant_fields(_, _, _subst, _rc) do
+  defp unify_variant_fields_sorted(_, _, _subst, _rc) do
     {:error, "variant count mismatch"}
   end
 

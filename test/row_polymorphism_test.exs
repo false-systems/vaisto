@@ -189,16 +189,24 @@ defmodule Vaisto.RowPolymorphismTest do
     end
   end
 
-  describe "field tvar ID partitioning" do
-    test "field tvar IDs are >= 100_000_000" do
+  describe "field tvar memoization" do
+    test "field tvars are allocated from fresh_var counter space" do
       code = "(defn get-x [r] (. r :x))"
       ast = Vaisto.Parser.parse(code)
       {:ok, _type, typed_ast} = TypeChecker.check(ast)
 
-      # Extract field tvar IDs from the typed AST
+      # Field tvars now come from the normal fresh_var counter (>= 10_000)
       tvar_ids = extract_tvar_ids(typed_ast)
-      field_tvars = Enum.filter(tvar_ids, &(&1 >= 100_000_000))
-      assert length(field_tvars) > 0, "Expected field tvar IDs >= 100_000_000"
+      field_tvars = Enum.filter(tvar_ids, &(&1 >= 10_000))
+      assert length(field_tvars) > 0, "Expected field tvar IDs from fresh_var counter"
+    end
+
+    test "same field on same record gets consistent type in different expressions" do
+      code = "(defn use-x [r] (+ (. r :x) (. r :x)))"
+      ast = Vaisto.Parser.parse(code)
+      {:ok, _type, _typed_ast} = TypeChecker.check(ast)
+      # If field tvars weren't memoized, the two .x accesses could get different tvars
+      # and + wouldn't know they're the same type. Success = no type error.
     end
 
     test "different fields used in + are unified (Num a => a -> a -> a)" do

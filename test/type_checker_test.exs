@@ -426,6 +426,17 @@ defmodule Vaisto.TypeCheckerTest do
     end
   end
 
+  describe "extern validation" do
+    test "extern with matching arity validates args (best-effort)" do
+      code = """
+      (extern erlang/integer_to_binary [:int] :string)
+      (erlang/integer_to_binary 42)
+      """
+      ast = Vaisto.Parser.parse(code)
+      assert {:ok, :module, _} = TypeChecker.check(ast)
+    end
+  end
+
   describe "conservative polymorphic defn" do
     test "identity function is generalized to forall" do
       code = "(defn id [x] x)"

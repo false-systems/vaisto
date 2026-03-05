@@ -815,9 +815,9 @@ defmodule Vaisto.CoreEmitter do
     # Convert each arg - strings pass through, others get converted
     # Build: erlang:iolist_to_binary([convert(a1), convert(a2), ...])
     # Where convert uses a case to handle strings vs other types
-    converted_args = Enum.map(args, fn arg ->
+    converted_args = args |> Enum.with_index() |> Enum.map(fn {arg, idx} ->
       arg_core = to_core_expr(arg, user_fns, local_vars)
-      arg_var = :cerl.c_var(:__str_arg__)
+      arg_var = :cerl.c_var(:"__str_arg_#{idx}__")
 
       # case Arg of
       #   X when is_binary(X) -> X;
@@ -1618,7 +1618,7 @@ defmodule Vaisto.CoreEmitter do
       _ -> []
     end
     case Enum.find_index(methods, fn {name, _} -> name == method_name end) do
-      nil -> 1
+      nil -> raise "compiler bug: method #{inspect(method_name)} not found in class #{inspect(class_name)}"
       idx -> idx + 1
     end
   end

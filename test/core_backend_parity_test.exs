@@ -591,6 +591,11 @@ defmodule Vaisto.CoreBackendParityTest do
       """
       assert {:ok, "value: 42"} = run_both(code, :str_int)
     end
+
+    test "str with multiple mixed-type args" do
+      code = ~s|(str "x" 42 true)|
+      assert {:ok, "x42true"} = run_both(code, :str_multi_mixed)
+    end
   end
 
   # =============================================================================

@@ -217,6 +217,14 @@ defmodule Vaisto.TypeSystem.UnifyTest do
     end
   end
 
+  describe "unify/3 with sum types" do
+    test "unifies sum types with reversed variant order" do
+      t1 = {:sum, :Result, [{:Ok, [:int]}, {:Err, [:string]}]}
+      t2 = {:sum, :Result, [{:Err, [:string]}, {:Ok, [:int]}]}
+      assert {:ok, _, _} = Unify.unify(t1, t2, %{}, 0)
+    end
+  end
+
   describe "unify/3 with pid types" do
     test "same process name pids unify" do
       assert {:ok, %{}, _} = Unify.unify({:pid, :counter, [:inc]}, {:pid, :counter, [:dec]})

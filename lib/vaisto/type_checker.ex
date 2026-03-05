@@ -406,7 +406,7 @@ defmodule Vaisto.TypeChecker do
                     note: "closed row does not have field `#{field}`"
                   )}
                 {:rvar, row_id} ->
-                  field_tvar_id = fresh_field_tvar_id(row_id, field)
+                  {field_tvar_id, ctx} = TcCtx.field_tvar(ctx, row_id, field)
                   field_type = {:tvar, field_tvar_id}
                   row_constraint = {:row, [{field, field_type} | fields], {:rvar, row_id + 1}}
                   {:ok, field_type, {:field_access, typed_record, field, field_type, row_constraint}, ctx}
@@ -414,14 +414,14 @@ defmodule Vaisto.TypeChecker do
           end
 
         {:tvar, tvar_id} ->
-          field_tvar_id = fresh_field_tvar_id(tvar_id, field)
+          {field_tvar_id, ctx} = TcCtx.field_tvar(ctx, tvar_id, field)
           field_type = {:tvar, field_tvar_id}
           row_constraint = {:row, [{field, field_type}], {:rvar, tvar_id}}
           {:ok, field_type, {:field_access, typed_record, field, field_type, row_constraint}, ctx}
 
         :any ->
           any_row_base_id = 200
-          field_tvar_id = fresh_field_tvar_id(any_row_base_id, field)
+          {field_tvar_id, ctx} = TcCtx.field_tvar(ctx, any_row_base_id, field)
           field_type = {:tvar, field_tvar_id}
           row_constraint = {:row, [{field, field_type}], {:rvar, any_row_base_id}}
           {:ok, field_type, {:field_access, typed_record, field, field_type, row_constraint}, ctx}
@@ -696,9 +696,21 @@ defmodule Vaisto.TypeChecker do
         with {:ok, _arg_types, typed_args, ctx} <- check_args_s(args, ctx) do
           {:ok, :any, {:call, {:qualified, mod, func}, typed_args, :any}, ctx}
         end
-      {:fn, _param_types, ret_type} ->
-        with {:ok, _arg_types, typed_args, ctx} <- check_args_s(args, ctx) do
-          {:ok, ret_type, {:call, {:qualified, mod, func}, typed_args, ret_type}, ctx}
+      {:fn, param_types, ret_type} = func_type ->
+        with {:ok, arg_types, typed_args, ctx} <- check_args_s(args, ctx) do
+          # Validate args when arity matches (externs may have multiple overloads)
+          # Use best-effort unification: if it fails, fall back to declared ret_type
+          # (extern declarations are often approximate for Erlang interop)
+          if length(param_types) == length(arg_types) do
+            case unify_call_s(func_type, arg_types, ctx, args, extern_name) do
+              {:ok, unified_ret, ctx} ->
+                {:ok, unified_ret, {:call, {:qualified, mod, func}, typed_args, unified_ret}, ctx}
+              {:error, _} ->
+                {:ok, ret_type, {:call, {:qualified, mod, func}, typed_args, ret_type}, ctx}
+            end
+          else
+            {:ok, ret_type, {:call, {:qualified, mod, func}, typed_args, ret_type}, ctx}
+          end
         end
       other ->
         {:error, Errors.extern_not_a_function(mod, func, other)}
@@ -890,7 +902,7 @@ defmodule Vaisto.TypeChecker do
       |> then(fn e -> Enum.reduce(param_names, e, &add_local_var(&2, &1)) end)
 
     saved_constrained = ctx.constrained_tvars
-    extended_ctx = %{ctx | env: extended_env, constrained_tvars: MapSet.new()}
+    extended_ctx = %{ctx | env: extended_env, constrained_tvars: %{}}
 
     # Check guard returns bool
     with {:ok, guard_type, typed_guard, ctx} <- check_s(guard, extended_ctx),
@@ -932,7 +944,7 @@ defmodule Vaisto.TypeChecker do
 
     # Save and reset constrained_tvars for this defn scope
     saved_constrained = ctx.constrained_tvars
-    extended_ctx = %{ctx | env: extended_env, constrained_tvars: MapSet.new()}
+    extended_ctx = %{ctx | env: extended_env, constrained_tvars: %{}}
 
     case check_s(body, extended_ctx) do
       {:ok, inferred_ret_type, typed_body, body_ctx} ->
@@ -1371,19 +1383,6 @@ defmodule Vaisto.TypeChecker do
   # Fallback
   defp parse_type_expr(other), do: other
 
-  # Generate a deterministic type variable ID for a field access
-  # This ensures that accessing the same field on the same row variable
-  # produces the same type variable, enabling proper constraint solving
-  # ID space partitioning:
-  #   0          .. 9_999         : Parser-assigned tvars
-  #   10_000     .. 99_999_999    : fresh_tvar_id (unique_integer + 10_000)
-  #   100_000_000 .. +∞           : fresh_field_tvar_id (deterministic, hash-based)
-  @field_tvar_base 100_000_000
-  defp fresh_field_tvar_id(base_id, field) do
-    field_hash = :erlang.phash2(field, 1_000_000)
-    @field_tvar_base + base_id * 1_000_000 + field_hash
-  end
-
   # Strip location from fn AST nodes
   defp strip_fn_loc({:fn, params, body, %Vaisto.Parser.Loc{}}), do: {:fn, params, body}
   defp strip_fn_loc(other), do: other
@@ -1660,6 +1659,20 @@ defmodule Vaisto.TypeChecker do
   defp typed_ast_type({:fn, _, _, type}), do: type
   defp typed_ast_type({:apply, _, _, type}), do: type
   defp typed_ast_type({:fn_ref, _, _, type}), do: type
+  defp typed_ast_type({:cons, _, _, type}), do: type
+  defp typed_ast_type({:tuple, _, type}), do: type
+  defp typed_ast_type({:map, _, type}), do: type
+  defp typed_ast_type({:receive, _, type}), do: type
+  defp typed_ast_type({:defn, _, _, _, type}), do: type
+  defp typed_ast_type({:defn_multi, _, _, _, type}), do: type
+  defp typed_ast_type({:deftype, _, _, _}), do: :unit
+  defp typed_ast_type({:process, _, _, _, type}), do: type
+  defp typed_ast_type({:field_access, _, _, type}), do: type
+  defp typed_ast_type({:field_access, _, _, type, _}), do: type
+  defp typed_ast_type({:constraint_call, _, _, _, type}), do: type
+  defp typed_ast_type({:cast, _, _, _type} = node), do: elem(node, 1)
+  defp typed_ast_type({:defval, _, _, type}), do: type
+  defp typed_ast_type({:supervise, _, _, type}), do: type
   defp typed_ast_type(_), do: :any
 
   # ============================================================================
@@ -1731,6 +1744,10 @@ defmodule Vaisto.TypeChecker do
     do: {:field_access, apply_subst_to_ast(subst, expr), field, C.apply_subst(subst, type)}
   defp apply_subst_to_ast(subst, {:field_access, expr, field, type, constraint}),
     do: {:field_access, apply_subst_to_ast(subst, expr), field, C.apply_subst(subst, type), C.apply_subst(subst, constraint)}
+
+  # Cast
+  defp apply_subst_to_ast(subst, {:cast, target_type, inner, src_type}),
+    do: {:cast, C.apply_subst(subst, target_type), apply_subst_to_ast(subst, inner), C.apply_subst(subst, src_type)}
 
   # Declarations — pass through
   defp apply_subst_to_ast(_subst, {:extern, _, _, _} = node), do: node
@@ -3192,8 +3209,9 @@ defmodule Vaisto.TypeChecker do
       end
     end)
 
-    # Second pass: type-check each form with full environment
-    check_module_forms(forms, env_with_signatures, [], [])
+    # Second pass: type-check each form with full environment, threading ctx
+    ctx = TcCtx.new(env_with_signatures)
+    check_module_forms(forms, ctx, [], [])
   end
 
   # Signature collection helpers
@@ -3387,53 +3405,59 @@ defmodule Vaisto.TypeChecker do
     end)
   end
 
-  defp check_module_forms([], _env, acc, errors) do
+  defp check_module_forms([], _ctx, acc, errors) do
     case errors do
       [] -> {:ok, :module, {:module, Enum.reverse(acc)}}
       _ -> {:error, Enum.reverse(errors)}
     end
   end
 
-  defp check_module_forms([{:deftype_deriving, name, type_def, classes, loc} | rest], env, acc, errors) do
-    check_deftype_deriving(name, type_def, classes, loc, env, rest, acc, errors)
+  defp check_module_forms([{:deftype_deriving, name, type_def, classes, loc} | rest], ctx, acc, errors) do
+    check_deftype_deriving(name, type_def, classes, loc, ctx, rest, acc, errors)
   end
-  defp check_module_forms([{:deftype_deriving, name, type_def, classes} | rest], env, acc, errors) do
-    check_deftype_deriving(name, type_def, classes, %Vaisto.Parser.Loc{}, env, rest, acc, errors)
+  defp check_module_forms([{:deftype_deriving, name, type_def, classes} | rest], ctx, acc, errors) do
+    check_deftype_deriving(name, type_def, classes, %Vaisto.Parser.Loc{}, ctx, rest, acc, errors)
   end
 
-  defp check_module_forms([form | rest], env, acc, errors) do
-    case check(form, env) do
-      {:ok, type, typed_form} ->
-        # Update env with more precise types after checking
-        # Pass the returned type (may be {:forall, ...} scheme for defn)
-        new_env = update_env_from_typed_form(typed_form, type, env)
-        check_module_forms(rest, new_env, [typed_form | acc], errors)
+  defp check_module_forms([form | rest], ctx, acc, errors) do
+    case check_s(form, ctx) do
+      {:ok, type, typed_form, new_ctx} ->
+        final_type = TcCtx.apply_subst(new_ctx, type)
+        final_ast = apply_subst_to_ast(new_ctx.subst, typed_form)
+        new_env = update_env_from_typed_form(final_ast, final_type, new_ctx.env)
+        # Reset substitution between forms — each form's type is fully resolved,
+        # and generalized schemes use quantified vars. Keeping stale bindings
+        # would pollute instantiation of polymorphic types in later forms.
+        # Counter and constrained_tvars carry forward to avoid tvar ID collisions.
+        next_ctx = %{new_ctx | env: new_env, subst: Vaisto.TypeSystem.Core.empty_subst()}
+        check_module_forms(rest, next_ctx, [final_ast | acc], errors)
 
       {:error, err} ->
-        # Continue checking remaining forms, accumulate error(s)
         new_errors = if is_list(err), do: Enum.reverse(err) ++ errors, else: [err | errors]
-        check_module_forms(rest, env, acc, new_errors)
+        check_module_forms(rest, ctx, acc, new_errors)
     end
   end
 
   # Deriving: check the deftype, then synthesize and check each derived instance
-  defp check_deftype_deriving(name, type_def, classes, loc, env, rest, acc, errors) do
-    case check({:deftype, name, type_def, loc}, env) do
-      {:ok, _type, typed_deftype} ->
-        new_env = update_env_from_typed_form(typed_deftype, env)
+  defp check_deftype_deriving(name, type_def, classes, loc, ctx, rest, acc, errors) do
+    case check_s({:deftype, name, type_def, loc}, ctx) do
+      {:ok, _type, typed_deftype, ctx} ->
+        final_deftype = apply_subst_to_ast(ctx.subst, typed_deftype)
+        new_env = update_env_from_typed_form(final_deftype, ctx.env)
+        ctx = %{ctx | env: new_env}
 
-        {instance_acc, err_acc} = Enum.reduce(classes, {[], errors}, fn class, {insts, errs} ->
-          case synthesize_and_check_instance(class, name, type_def, loc, new_env) do
-            {:ok, _type, typed_inst} -> {[typed_inst | insts], errs}
-            {:error, err} -> {insts, [err | errs]}
+        {instance_acc, err_acc, ctx} = Enum.reduce(classes, {[], errors, ctx}, fn class, {insts, errs, ctx} ->
+          case synthesize_and_check_instance_s(class, name, type_def, loc, ctx) do
+            {:ok, _type, typed_inst, ctx} -> {[typed_inst | insts], errs, ctx}
+            {:error, err} -> {insts, [err | errs], ctx}
           end
         end)
 
-        new_acc = Enum.reverse(instance_acc) ++ [typed_deftype | acc]
-        check_module_forms(rest, new_env, new_acc, err_acc)
+        new_acc = Enum.reverse(instance_acc) ++ [final_deftype | acc]
+        check_module_forms(rest, ctx, new_acc, err_acc)
 
       {:error, err} ->
-        check_module_forms(rest, env, acc, [err | errors])
+        check_module_forms(rest, ctx, acc, [err | errors])
     end
   end
 
@@ -3464,6 +3488,43 @@ defmodule Vaisto.TypeChecker do
   end
 
   defp synthesize_and_check_instance(class, _for_type, _type_def, _loc, _env) do
+    {:error, Errors.derive_not_supported(class)}
+  end
+
+  # ctx-threaded variants for check_deftype_deriving
+  defp synthesize_and_check_instance_s(:Eq, for_type, _type_def, loc, ctx) do
+    methods = [{:eq, [:x, :y], {:call, :==, [:x, :y], loc}}]
+    case check_s({:instance, :Eq, for_type, methods, loc}, ctx) do
+      {:ok, type, ast, ctx} ->
+        {:ok, type, apply_subst_to_ast(ctx.subst, ast), ctx}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp synthesize_and_check_instance_s(:Show, for_type, {:sum, variants}, loc, ctx) do
+    has_fields? = Enum.any?(variants, fn {_ctor, fields} -> fields != [] end)
+
+    if has_fields? do
+      {:error, Errors.derive_show_has_fields(for_type)}
+    else
+      match_clauses = Enum.map(variants, fn {ctor_name, []} ->
+        {{:call, ctor_name, [], loc}, {:string, Atom.to_string(ctor_name)}}
+      end)
+      match_expr = {:match, :x, match_clauses, loc}
+      methods = [{:show, [:x], match_expr}]
+      case check_s({:instance, :Show, for_type, methods, loc}, ctx) do
+        {:ok, type, ast, ctx} ->
+          {:ok, type, apply_subst_to_ast(ctx.subst, ast), ctx}
+        {:error, _} = err -> err
+      end
+    end
+  end
+
+  defp synthesize_and_check_instance_s(:Show, for_type, {:product, _}, _loc, _ctx) do
+    {:error, Errors.derive_show_record(for_type)}
+  end
+
+  defp synthesize_and_check_instance_s(class, _for_type, _type_def, _loc, _ctx) do
     {:error, Errors.derive_not_supported(class)}
   end
 

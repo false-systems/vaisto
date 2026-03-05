@@ -10,7 +10,7 @@ defmodule Vaisto.TypeChecker.TcCtx do
   alias Vaisto.TypeSystem.Core
   alias Vaisto.TypeSystem.Unify
 
-  defstruct [:env, :subst, row_counter: 0, counter: 10_000, constraints: [], constrained_tvars: %{}]
+  defstruct [:env, :subst, row_counter: 0, counter: 10_000, constraints: [], constrained_tvars: %{}, field_tvars: %{}]
 
   @doc "Create a new context from a type environment."
   def new(env) do
@@ -89,6 +89,22 @@ defmodule Vaisto.TypeChecker.TcCtx do
       {[], _} -> type
       {_, []} -> {:forall, quantified, type}
       _ -> {:forall, quantified, {:constrained, relevant, type}}
+    end
+  end
+
+  @doc """
+  Get or create a deterministic type variable for a field access on a base type variable.
+  Returns `{tvar_id, updated_ctx}`. Memoized: same (base_id, field) always returns the same tvar.
+  """
+  def field_tvar(%__MODULE__{} = ctx, base_id, field) do
+    key = {base_id, field}
+    case Map.get(ctx.field_tvars, key) do
+      nil ->
+        {tvar, ctx} = fresh_var(ctx)
+        {:tvar, id} = tvar
+        {id, %{ctx | field_tvars: Map.put(ctx.field_tvars, key, id)}}
+      id ->
+        {id, ctx}
     end
   end
 
