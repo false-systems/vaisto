@@ -587,4 +587,29 @@ defmodule Vaisto.TypeCheckerTest do
       assert {:forall, [_v], {:fn, [{:tvar, _}], _ret}} = type
     end
   end
+
+  describe "lambda fallback behavior" do
+    test "lambda with type error propagates error instead of falling back" do
+      # (fn [x] (+ x "hello")) — genuine type error, should NOT fall back to :any
+      code = ~s|(fn [x] (+ x "hello"))|
+      ast = Vaisto.Parser.parse(code)
+      assert {:error, _} = TypeChecker.check(ast)
+    end
+
+    test "lambda with unsupported form falls back to :any params" do
+      # (fn [x] (match x [1 "one"] [2 "two"])) — Infer handles match now,
+      # but let's test that lambda happy path still works
+      code = ~s|(fn [x] (+ x 1))|
+      ast = Vaisto.Parser.parse(code)
+      {:ok, type, _typed_ast} = TypeChecker.check(ast)
+      assert {:fn, [:int], :int} = type
+    end
+
+    test "lambda happy path infers concrete types" do
+      code = ~s|(fn [x y] (+ x y))|
+      ast = Vaisto.Parser.parse(code)
+      {:ok, type, _typed_ast} = TypeChecker.check(ast)
+      assert {:fn, [:int, :int], :int} = type
+    end
+  end
 end

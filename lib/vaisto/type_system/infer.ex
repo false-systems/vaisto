@@ -120,7 +120,7 @@ defmodule Vaisto.TypeSystem.Infer do
         {:ok, type, {:fn_ref, name, arity, type}, ctx}
 
       :error ->
-        {:error, "Undefined function reference: #{name}/#{arity}"}
+        {:error, Errors.undefined_variable(name)}
     end
   end
 
@@ -163,7 +163,7 @@ defmodule Vaisto.TypeSystem.Infer do
         {:ok, :any, {:call, :head, [typed_list], :any}, ctx}
 
       {:ok, other_type, _typed_list, _ctx} ->
-        {:error, "head expects a list, got #{Core.format_type(other_type)}"}
+        {:error, Errors.not_a_list("head", other_type)}
 
       error ->
         error
@@ -180,7 +180,7 @@ defmodule Vaisto.TypeSystem.Infer do
         {:ok, list_type, {:call, :tail, [typed_list], list_type}, ctx}
 
       {:ok, other_type, _typed_list, _ctx} ->
-        {:error, "tail expects a list, got #{Core.format_type(other_type)}"}
+        {:error, Errors.not_a_list("tail", other_type)}
 
       error ->
         error
@@ -196,7 +196,7 @@ defmodule Vaisto.TypeSystem.Infer do
         {:ok, :bool, {:call, :empty?, [typed_list], :bool}, ctx}
 
       {:ok, other_type, _typed_list, _ctx} ->
-        {:error, "empty? expects a list, got #{Core.format_type(other_type)}"}
+        {:error, Errors.not_a_list("empty?", other_type)}
 
       error ->
         error
@@ -212,7 +212,7 @@ defmodule Vaisto.TypeSystem.Infer do
         {:ok, :int, {:call, :length, [typed_list], :int}, ctx}
 
       {:ok, other_type, _typed_list, _ctx} ->
-        {:error, "length expects a list, got #{Core.format_type(other_type)}"}
+        {:error, Errors.not_a_list("length", other_type)}
 
       error ->
         error
@@ -242,13 +242,13 @@ defmodule Vaisto.TypeSystem.Infer do
           {:ok, result_type, {:call, :map, [typed_func, typed_list], result_type}, ctx}
 
         {:fn, args, _} ->
-          {:error, "map expects a function with 1 argument, got #{length(args)}"}
+          {:error, Errors.mapper_arity("map", 1, length(args))}
 
         :any ->
           {:ok, {:list, :any}, {:call, :map, [typed_func, typed_list], {:list, :any}}, ctx}
 
         _ ->
-          {:error, "map expects a function as first argument, got #{Core.format_type(func_type)}"}
+          {:error, Errors.not_a_function("map", func_type)}
       end
     end
   end
@@ -264,16 +264,16 @@ defmodule Vaisto.TypeSystem.Infer do
           {:ok, result_type, {:call, :filter, [typed_func, typed_list], result_type}, ctx}
 
         {:fn, [_arg_type], ret_type} ->
-          {:error, "filter predicate must return Bool, got #{Core.format_type(ret_type)}"}
+          {:error, Errors.predicate_not_bool(ret_type)}
 
         {:fn, args, _} ->
-          {:error, "filter expects a function with 1 argument, got #{length(args)}"}
+          {:error, Errors.mapper_arity("filter", 1, length(args))}
 
         :any ->
           {:ok, list_type, {:call, :filter, [typed_func, typed_list], list_type}, ctx}
 
         _ ->
-          {:error, "filter expects a function as first argument, got #{Core.format_type(func_type)}"}
+          {:error, Errors.not_a_function("filter", func_type)}
       end
     end
   end
@@ -289,13 +289,13 @@ defmodule Vaisto.TypeSystem.Infer do
           {:ok, ret_type, {:call, :fold, [typed_func, typed_init, typed_list], ret_type}, ctx}
 
         {:fn, args, _} ->
-          {:error, "fold expects a function with 2 arguments, got #{length(args)}"}
+          {:error, Errors.mapper_arity("fold", 2, length(args))}
 
         :any ->
           {:ok, init_type, {:call, :fold, [typed_func, typed_init, typed_list], init_type}, ctx}
 
         _ ->
-          {:error, "fold expects a function as first argument, got #{Core.format_type(func_type)}"}
+          {:error, Errors.not_a_function("fold", func_type)}
       end
     end
   end
@@ -316,8 +316,8 @@ defmodule Vaisto.TypeSystem.Infer do
             error
         end
 
-      {:ok, _other} ->
-        {:error, "#{mod}:#{func} is not a function"}
+      {:ok, other} ->
+        {:error, Errors.non_function_call(other)}
 
       :error ->
         # Not registered — allow with :any (dynamic interop)
@@ -376,8 +376,11 @@ defmodule Vaisto.TypeSystem.Infer do
               error
           end
 
+        {:error, %Vaisto.Error{} = err} ->
+          {:error, err}
+
         {:error, reason} ->
-          {:error, "Cannot call non-function: #{reason}"}
+          {:error, Errors.non_function_call(reason)}
       end
     end
   end
@@ -478,8 +481,11 @@ defmodule Vaisto.TypeSystem.Infer do
           {:ok, ctx} ->
             {:ok, field_tvar, {:field_access, typed_record, field, field_tvar}, ctx}
 
+          {:error, %Vaisto.Error{} = err} ->
+            {:error, err}
+
           {:error, reason} ->
-            {:error, "Field access error: #{reason}"}
+            {:error, Errors.field_access_error(field, reason)}
         end
 
       error ->
@@ -623,7 +629,7 @@ defmodule Vaisto.TypeSystem.Infer do
     case func_type do
       {:fn, param_types, ret_type} ->
         if length(param_types) != length(args) do
-          {:error, "Arity mismatch: #{func_name} expects #{length(param_types)} args, got #{length(args)}"}
+          {:error, Errors.arity_mismatch(func_name, length(param_types), length(args))}
         else
           # Infer each argument and unify with expected param type
           case infer_and_unify_args(args, param_types, ctx, []) do
@@ -636,7 +642,7 @@ defmodule Vaisto.TypeSystem.Infer do
         end
 
       other ->
-        {:error, "Cannot call non-function: #{inspect(other)}"}
+        {:error, Errors.non_function_call(other)}
     end
   end
 
@@ -651,8 +657,11 @@ defmodule Vaisto.TypeSystem.Infer do
           {:ok, ctx} ->
             infer_and_unify_args(rest_args, rest_params, ctx, [typed_arg | acc])
 
+          {:error, %Vaisto.Error{} = err} ->
+            {:error, err}
+
           {:error, reason} ->
-            {:error, "Type mismatch in argument: #{reason}"}
+            {:error, Errors.type_mismatch(reason, reason)}
         end
 
       error ->
@@ -688,8 +697,11 @@ defmodule Vaisto.TypeSystem.Infer do
           {:ok, ctx} ->
             infer_list_elements(rest, elem_tvar, ctx, [typed_elem | acc])
 
+          {:error, %Vaisto.Error{} = err} ->
+            {:error, err}
+
           {:error, reason} ->
-            {:error, "List element type mismatch: #{reason}"}
+            {:error, Errors.list_type_mismatch(reason, reason)}
         end
 
       error ->
@@ -963,13 +975,19 @@ defmodule Vaisto.TypeSystem.Infer do
     infer_pattern_elements(rest, rest_types, ctx, Enum.reverse(bindings) ++ bindings_acc, [typed_elem | elems_acc])
   end
 
-  defp with_location(msg, %Vaisto.Parser.Loc{line: line, col: col, file: file}) do
+  defp with_location(%Vaisto.Error{} = error, %Vaisto.Parser.Loc{} = loc) do
+    %{error | primary_span: Vaisto.Error.span_from_loc(loc)}
+  end
+
+  defp with_location(msg, %Vaisto.Parser.Loc{line: line, col: col, file: file}) when is_binary(msg) do
     prefix = case file do
       nil -> "#{line}:#{col}"
       f -> "#{f}:#{line}:#{col}"
     end
     "#{prefix}: #{msg}"
   end
+
+  defp with_location(error, _loc), do: error
 
   # Apply substitution to typed AST
   defp apply_subst_to_ast(ast, subst) when map_size(subst) == 0, do: ast

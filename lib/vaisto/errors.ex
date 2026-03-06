@@ -96,6 +96,26 @@ defmodule Vaisto.Errors do
     )
   end
 
+  @doc "Calling a non-function value"
+  def non_function_call(actual, opts \\ []) do
+    Error.new("cannot call non-function",
+      Keyword.merge(opts, [
+        actual: actual,
+        note: "only functions can be called"
+      ])
+    )
+  end
+
+  @doc "Field access failed (row unification)"
+  def field_access_error(field, actual, opts \\ []) do
+    Error.new("field access error",
+      Keyword.merge(opts, [
+        actual: actual,
+        note: "cannot access field `#{field}` on this type"
+      ])
+    )
+  end
+
   @doc "filter predicate must return bool"
   def predicate_not_bool(actual, opts \\ []) do
     Error.new("predicate must return Bool",

@@ -992,26 +992,20 @@ defmodule Vaisto.TypeChecker do
       {:ok, func_type, typed_ast} ->
         {:ok, func_type, typed_ast, ctx}
 
-      {:error, _} ->
-        {typed_params, param_bindings} = Enum.map_reduce(params, [], fn
-          {:tuple_pattern, _elements} = pattern, acc ->
-            bindings = extract_pattern_bindings(pattern, :any, ctx.env)
-            typed_pattern = type_pattern(pattern, :any, ctx.env)
-            {typed_pattern, bindings ++ acc}
-          var, acc when is_atom(var) and var not in [:_, true, false] ->
-            {{:var, var, :any}, [{var, :any} | acc]}
-          other, acc ->
-            {other, acc}
-        end)
+      {:error, %Vaisto.Error{message: msg} = err} ->
+        # Fall back for errors that indicate Infer's limitations (missing names, unsupported forms).
+        # Propagate genuine type errors (type mismatch, arity mismatch, etc.).
+        if infer_should_fallback?(msg) do
+          fallback_lambda(params, body, ctx)
+        else
+          {:error, err}
+        end
 
-        param_types = Enum.map(params, fn _ -> :any end)
-        extended_ctx = %{ctx | env: Map.merge(ctx.env, Map.new(param_bindings))}
-
-        case check_s(body, extended_ctx) do
-          {:ok, ret_type, typed_body, ctx} ->
-            func_type = {:fn, param_types, ret_type}
-            {:ok, func_type, {:fn, typed_params, typed_body, func_type}, ctx}
-          error -> error
+      {:error, msg} when is_binary(msg) ->
+        if infer_should_fallback?(msg) do
+          fallback_lambda(params, body, ctx)
+        else
+          {:error, Vaisto.Error.from_string(msg)}
         end
     end
   end
@@ -1160,6 +1154,38 @@ defmodule Vaisto.TypeChecker do
   # Parse error propagation
   defp check_impl_s({:error, %Error{} = error}, _ctx), do: {:error, error}
   defp check_impl_s({:error, msg}, _ctx) when is_binary(msg), do: {:error, Errors.parse_error(msg)}
+
+  # Determine if an Infer error indicates its limitations rather than a genuine type error.
+  # Infer has a limited env and doesn't support all forms — fall back to TypeChecker for these.
+  @infer_fallback_messages ["unknown expression", "unknown function", "undefined variable",
+                            "cannot call non-function"]
+  defp infer_should_fallback?(msg) when is_binary(msg) do
+    Enum.any?(@infer_fallback_messages, &String.starts_with?(msg, &1))
+  end
+
+  # Fallback for lambdas when Infer can't handle the body (e.g., match, let, do)
+  defp fallback_lambda(params, body, ctx) do
+    {typed_params, param_bindings} = Enum.map_reduce(params, [], fn
+      {:tuple_pattern, _elements} = pattern, acc ->
+        bindings = extract_pattern_bindings(pattern, :any, ctx.env)
+        typed_pattern = type_pattern(pattern, :any, ctx.env)
+        {typed_pattern, bindings ++ acc}
+      var, acc when is_atom(var) and var not in [:_, true, false] ->
+        {{:var, var, :any}, [{var, :any} | acc]}
+      other, acc ->
+        {other, acc}
+    end)
+
+    param_types = Enum.map(params, fn _ -> :any end)
+    extended_ctx = %{ctx | env: Map.merge(ctx.env, Map.new(param_bindings))}
+
+    case check_s(body, extended_ctx) do
+      {:ok, ret_type, typed_body, ctx} ->
+        func_type = {:fn, param_types, ret_type}
+        {:ok, func_type, {:fn, typed_params, typed_body, func_type}, ctx}
+      error -> error
+    end
+  end
 
   # ============================================================================
   # Legacy check_impl clauses — retained for instance/deriving bodies only

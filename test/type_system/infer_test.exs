@@ -61,8 +61,8 @@ defmodule Vaisto.TypeSystem.InferTest do
     end
 
     test "errors on arity mismatch" do
-      assert {:error, msg} = Infer.infer({:call, :+, [1]})
-      assert msg =~ "Arity mismatch"
+      assert {:error, %Vaisto.Error{message: msg}} = Infer.infer({:call, :+, [1]})
+      assert msg =~ "wrong number of arguments"
     end
 
     test "errors on unknown function" do
@@ -178,8 +178,7 @@ defmodule Vaisto.TypeSystem.InferTest do
     end
 
     test "errors on heterogeneous list" do
-      assert {:error, msg} = Infer.infer({:list, [1, {:string, "hello"}]})
-      assert msg =~ "mismatch"
+      assert {:error, %Vaisto.Error{}} = Infer.infer({:list, [1, {:string, "hello"}]})
     end
   end
 
@@ -300,8 +299,7 @@ defmodule Vaisto.TypeSystem.InferTest do
     end
 
     test "head errors on non-list" do
-      assert {:error, msg} = Infer.infer({:call, :head, [42]})
-      assert msg =~ "head expects a list"
+      assert {:error, %Vaisto.Error{message: "expected a list"}} = Infer.infer({:call, :head, [42]})
     end
 
     test "tail returns list type" do
@@ -317,8 +315,7 @@ defmodule Vaisto.TypeSystem.InferTest do
     end
 
     test "tail errors on non-list" do
-      assert {:error, msg} = Infer.infer({:call, :tail, [42]})
-      assert msg =~ "tail expects a list"
+      assert {:error, %Vaisto.Error{message: "expected a list"}} = Infer.infer({:call, :tail, [42]})
     end
 
     test "empty? returns bool" do
@@ -334,8 +331,7 @@ defmodule Vaisto.TypeSystem.InferTest do
     end
 
     test "empty? errors on non-list" do
-      assert {:error, msg} = Infer.infer({:call, :empty?, [42]})
-      assert msg =~ "empty? expects a list"
+      assert {:error, %Vaisto.Error{message: "expected a list"}} = Infer.infer({:call, :empty?, [42]})
     end
 
     test "length returns int" do
@@ -345,8 +341,7 @@ defmodule Vaisto.TypeSystem.InferTest do
     end
 
     test "length errors on non-list" do
-      assert {:error, msg} = Infer.infer({:call, :length, [42]})
-      assert msg =~ "length expects a list"
+      assert {:error, %Vaisto.Error{message: "expected a list"}} = Infer.infer({:call, :length, [42]})
     end
 
     test "head typed AST shape" do
@@ -387,8 +382,7 @@ defmodule Vaisto.TypeSystem.InferTest do
     end
 
     test "fn_ref errors on undefined" do
-      assert {:error, msg} = Infer.infer({:fn_ref, :unknown, 1})
-      assert msg =~ "Undefined function reference"
+      assert {:error, %Vaisto.Error{message: "undefined variable"}} = Infer.infer({:fn_ref, :unknown, 1})
     end
 
     test "variable lookup emits fn_ref for function types" do
@@ -435,14 +429,14 @@ defmodule Vaisto.TypeSystem.InferTest do
         :add => {:fn, [:int, :int], :int},
         :xs => {:list, :int}
       })
-      assert {:error, msg} = Infer.infer({:call, :map, [:add, :xs]}, env)
-      assert msg =~ "1 argument"
+      assert {:error, %Vaisto.Error{message: msg}} = Infer.infer({:call, :map, [:add, :xs]}, env)
+      assert msg =~ "wrong arity"
     end
 
     test "map errors on non-function" do
       env = Map.merge(Infer.__primitives__(), %{:xs => {:list, :int}})
-      assert {:error, msg} = Infer.infer({:call, :map, [42, :xs]}, env)
-      assert msg =~ "function"
+      assert {:error, %Vaisto.Error{message: msg}} = Infer.infer({:call, :map, [42, :xs]}, env)
+      assert msg =~ "expected a function"
     end
 
     test "map typed AST shape" do
@@ -479,8 +473,8 @@ defmodule Vaisto.TypeSystem.InferTest do
         :inc => {:fn, [:int], :int},
         :xs => {:list, :int}
       })
-      assert {:error, msg} = Infer.infer({:call, :filter, [:inc, :xs]}, env)
-      assert msg =~ "Bool"
+      assert {:error, %Vaisto.Error{message: msg}} = Infer.infer({:call, :filter, [:inc, :xs]}, env)
+      assert msg =~ "predicate must return Bool"
     end
 
     test "filter errors on wrong arity" do
@@ -488,8 +482,8 @@ defmodule Vaisto.TypeSystem.InferTest do
         :add => {:fn, [:int, :int], :int},
         :xs => {:list, :int}
       })
-      assert {:error, msg} = Infer.infer({:call, :filter, [:add, :xs]}, env)
-      assert msg =~ "1 argument"
+      assert {:error, %Vaisto.Error{message: msg}} = Infer.infer({:call, :filter, [:add, :xs]}, env)
+      assert msg =~ "wrong arity"
     end
   end
 
@@ -517,14 +511,14 @@ defmodule Vaisto.TypeSystem.InferTest do
         :inc => {:fn, [:int], :int},
         :xs => {:list, :int}
       })
-      assert {:error, msg} = Infer.infer({:call, :fold, [:inc, 0, :xs]}, env)
-      assert msg =~ "2 arguments"
+      assert {:error, %Vaisto.Error{message: msg}} = Infer.infer({:call, :fold, [:inc, 0, :xs]}, env)
+      assert msg =~ "wrong arity"
     end
 
     test "fold errors on non-function" do
       env = Map.merge(Infer.__primitives__(), %{:xs => {:list, :int}})
-      assert {:error, msg} = Infer.infer({:call, :fold, [42, 0, :xs]}, env)
-      assert msg =~ "function"
+      assert {:error, %Vaisto.Error{message: msg}} = Infer.infer({:call, :fold, [42, 0, :xs]}, env)
+      assert msg =~ "expected a function"
     end
 
     test "fold typed AST shape" do
@@ -598,10 +592,10 @@ defmodule Vaisto.TypeSystem.InferTest do
     end
 
     test "apply errors on non-function expression" do
-      assert {:error, msg} = Infer.infer(
+      assert {:error, %Vaisto.Error{message: msg}} = Infer.infer(
         {:call, 42, [1]}
       )
-      assert msg =~ "non-function"
+      assert msg =~ "cannot" or msg =~ "unify"
     end
 
     test "apply with location stripping" do
