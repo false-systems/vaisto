@@ -2,6 +2,7 @@ defmodule Vaisto.TypeSystem.UnifyTest do
   use ExUnit.Case
   alias Vaisto.TypeSystem.Unify
   alias Vaisto.TypeSystem.Core
+  alias Vaisto.Error
 
   describe "unify/3 with primitives" do
     test "same primitives unify" do
@@ -10,8 +11,7 @@ defmodule Vaisto.TypeSystem.UnifyTest do
     end
 
     test "different primitives fail" do
-      assert {:error, msg} = Unify.unify(:int, :bool)
-      assert msg =~ "cannot unify"
+      assert {:error, %Error{message: "cannot unify types"}} = Unify.unify(:int, :bool)
     end
   end
 
@@ -64,8 +64,7 @@ defmodule Vaisto.TypeSystem.UnifyTest do
     test "function types with different arities fail" do
       fn1 = {:fn, [:int], :int}
       fn2 = {:fn, [:int, :int], :int}
-      assert {:error, msg} = Unify.unify(fn1, fn2)
-      assert msg =~ "arity"
+      assert {:error, %Error{message: "function arity mismatch"}} = Unify.unify(fn1, fn2)
     end
 
     test "function with type variables unifies" do
@@ -98,8 +97,7 @@ defmodule Vaisto.TypeSystem.UnifyTest do
     test "different record names fail" do
       r1 = {:record, :point, [{:x, :int}]}
       r2 = {:record, :vec, [{:x, :int}]}
-      assert {:error, msg} = Unify.unify(r1, r2)
-      assert msg =~ "cannot unify records"
+      assert {:error, %Error{message: "cannot unify records"}} = Unify.unify(r1, r2)
     end
 
     test "record with type variable fields unifies" do
@@ -122,8 +120,7 @@ defmodule Vaisto.TypeSystem.UnifyTest do
     test "different size tuples fail" do
       t1 = {:tuple, [:int, :bool]}
       t2 = {:tuple, [:int]}
-      assert {:error, msg} = Unify.unify(t1, t2)
-      assert msg =~ "size mismatch"
+      assert {:error, %Error{message: "tuple size mismatch"}} = Unify.unify(t1, t2)
     end
   end
 
@@ -139,8 +136,7 @@ defmodule Vaisto.TypeSystem.UnifyTest do
       # Row 1 has :y, Row 2 has :z — same tail can't absorb both
       r1 = {:row, [{:x, :int}, {:y, :bool}], {:rvar, 5}}
       r2 = {:row, [{:x, :int}, {:z, :string}], {:rvar, 5}}
-      assert {:error, msg} = Unify.unify(r1, r2)
-      assert msg =~ "same row variable"
+      assert {:error, %Error{message: "row field mismatch"}} = Unify.unify(r1, r2)
     end
 
     test "different rvar tails with extras still works" do
@@ -159,15 +155,13 @@ defmodule Vaisto.TypeSystem.UnifyTest do
     test "prevents infinite types" do
       # Trying to unify a with List(a) should fail
       result = Unify.unify({:tvar, 0}, {:list, {:tvar, 0}})
-      assert {:error, msg} = result
-      assert msg =~ "infinite type"
+      assert {:error, %Error{message: "infinite type"}} = result
     end
 
     test "detects occurs in nested types" do
       # a = (a -> int) should fail
       result = Unify.unify({:tvar, 0}, {:fn, [{:tvar, 0}], :int})
-      assert {:error, msg} = result
-      assert msg =~ "infinite type"
+      assert {:error, %Error{message: "infinite type"}} = result
     end
   end
 

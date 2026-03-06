@@ -152,14 +152,12 @@ defmodule Vaisto.TypeSystem.InferTest do
 
     test "errors on non-bool condition" do
       # (if 1 10 20) should error
-      assert {:error, msg} = Infer.infer({:if, 1, 10, 20})
-      assert msg =~ "unify"
+      assert {:error, %Vaisto.Error{message: "cannot unify types"}} = Infer.infer({:if, 1, 10, 20})
     end
 
     test "errors on branch type mismatch" do
       # (if true 1 "hello") should error
-      assert {:error, msg} = Infer.infer({:if, true, 1, {:string, "hello"}})
-      assert msg =~ "unify"
+      assert {:error, %Vaisto.Error{message: "cannot unify types"}} = Infer.infer({:if, true, 1, {:string, "hello"}})
     end
   end
 
