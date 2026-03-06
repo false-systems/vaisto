@@ -171,9 +171,9 @@ defmodule Vaisto.CoreEmitterTest do
     test "matches raw Erlang-style tuples with match" do
       code = """
       (defn safe-div [x y]
-        (match (if (== y 0) {:error "div by zero"} {:ok (/ x y)})
+        (match (if (== y 0) {:error 0.0} {:ok (/ x y)})
           [{:ok result} result]
-          [{:error msg} 0]))
+          [{:error fallback} fallback]))
       (safe-div 10 2)
       """
       ast = Parser.parse(code)

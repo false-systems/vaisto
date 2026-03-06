@@ -652,30 +652,30 @@ defmodule Vaisto.TypeSystem.InferTest do
   end
 
   describe "tuple expressions" do
-    test "tuple_pattern infers :any" do
+    test "tuple_pattern infers element types" do
       {:ok, type, _ast} = Infer.infer({:tuple_pattern, [1, 2]})
-      assert type == :any
+      assert type == {:tuple, [:int, :int]}
     end
 
-    test "tuple infers :any" do
+    test "tuple infers element types" do
       {:ok, type, _ast} = Infer.infer({:tuple, [1, {:string, "hello"}]})
-      assert type == :any
+      assert type == {:tuple, [:int, :string]}
     end
 
-    test "empty tuple infers :any" do
+    test "empty tuple infers empty tuple type" do
       {:ok, type, _ast} = Infer.infer({:tuple, []})
-      assert type == :any
+      assert type == {:tuple, []}
     end
 
     test "typed AST shape for tuples" do
       {:ok, _type, ast} = Infer.infer({:tuple, [1, true]})
-      assert {:tuple, [_, _], :any} = ast
+      assert {:tuple, [_, _], {:tuple, [:int, :bool]}} = ast
     end
 
     test "location stripping works for tuples" do
       loc = %Vaisto.Parser.Loc{line: 1, col: 1, file: nil}
       {:ok, type, _ast} = Infer.infer({:tuple, [1, 2], loc})
-      assert type == :any
+      assert type == {:tuple, [:int, :int]}
     end
   end
 
