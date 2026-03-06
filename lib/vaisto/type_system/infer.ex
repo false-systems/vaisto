@@ -519,7 +519,9 @@ defmodule Vaisto.TypeSystem.Infer do
   defp infer_expr({:tuple, elements}, ctx) when is_list(elements) do
     case infer_all_elements(elements, ctx, []) do
       {:ok, typed_elements, ctx} ->
-        {:ok, :any, {:tuple, typed_elements, :any}, ctx}
+        elem_types = Enum.map(typed_elements, &typed_elem_type/1)
+        tuple_type = {:tuple, elem_types}
+        {:ok, tuple_type, {:tuple, typed_elements, tuple_type}, ctx}
 
       error ->
         error
@@ -533,7 +535,9 @@ defmodule Vaisto.TypeSystem.Infer do
   defp infer_expr({:tuple_pattern, elements}, ctx) when is_list(elements) do
     case infer_all_elements(elements, ctx, []) do
       {:ok, typed_elements, ctx} ->
-        {:ok, :any, {:tuple, typed_elements, :any}, ctx}
+        elem_types = Enum.map(typed_elements, &typed_elem_type/1)
+        tuple_type = {:tuple, elem_types}
+        {:ok, tuple_type, {:tuple, typed_elements, tuple_type}, ctx}
 
       error ->
         error
@@ -730,6 +734,21 @@ defmodule Vaisto.TypeSystem.Infer do
         error
     end
   end
+
+  # Extract type from a typed AST element (type is always the last tuple element)
+  defp typed_elem_type({:lit, type, _}), do: type
+  defp typed_elem_type({:var, _, type}), do: type
+  defp typed_elem_type({:call, _, _, type}), do: type
+  defp typed_elem_type({:tuple, _, type}), do: type
+  defp typed_elem_type({:list, _, type}), do: type
+  defp typed_elem_type({:fn, _, _, type}), do: type
+  defp typed_elem_type({:if, _, _, _, type}), do: type
+  defp typed_elem_type({:match, _, _, type}), do: type
+  defp typed_elem_type({:let, _, _, type}), do: type
+  defp typed_elem_type({:do, _, type}), do: type
+  defp typed_elem_type({:cons, _, _, type}), do: type
+  defp typed_elem_type({:map, _, type}), do: type
+  defp typed_elem_type(_), do: :any
 
   # --- Match helpers ---
 

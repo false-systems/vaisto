@@ -283,7 +283,9 @@ defmodule Vaisto.TypeChecker do
   # Tuple patterns and tuples — ctx-threaded
   defp check_impl_s({:tuple_pattern, elements}, ctx) do
     case check_args_s(elements, ctx) do
-      {:ok, _types, typed_elements, ctx} -> {:ok, :any, {:tuple, typed_elements, :any}, ctx}
+      {:ok, types, typed_elements, ctx} ->
+        tuple_type = {:tuple, types}
+        {:ok, tuple_type, {:tuple, typed_elements, tuple_type}, ctx}
       error -> error
     end
   end
@@ -292,7 +294,9 @@ defmodule Vaisto.TypeChecker do
   end
   defp check_impl_s({:tuple, elements}, ctx) do
     case check_args_s(elements, ctx) do
-      {:ok, _types, typed_elements, ctx} -> {:ok, :any, {:tuple, typed_elements, :any}, ctx}
+      {:ok, types, typed_elements, ctx} ->
+        tuple_type = {:tuple, types}
+        {:ok, tuple_type, {:tuple, typed_elements, tuple_type}, ctx}
       error -> error
     end
   end

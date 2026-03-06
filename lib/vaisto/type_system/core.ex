@@ -201,6 +201,10 @@ defmodule Vaisto.TypeSystem.Core do
   def format_type_with_ctx({:record, name, _}, _ctx), do: "#{name}"
   def format_type_with_ctx({:sum, name, _variants}, _ctx), do: "#{name}"
   def format_type_with_ctx({:variant, sum_name, ctor, _}, _ctx), do: "#{sum_name}.#{ctor}"
+  def format_type_with_ctx({:tuple, types}, ctx) do
+    inner = types |> Enum.map(&format_type_with_ctx(&1, ctx)) |> Enum.join(", ")
+    "Tuple(#{inner})"
+  end
   def format_type_with_ctx({:fn, args, ret}, ctx) do
     arg_str = args |> Enum.map(&format_type_with_ctx(&1, ctx)) |> Enum.join(", ")
     "(#{arg_str}) -> #{format_type_with_ctx(ret, ctx)}"
