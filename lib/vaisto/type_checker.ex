@@ -1977,11 +1977,21 @@ defmodule Vaisto.TypeChecker do
   end
 
   # Tuple pattern: {:tuple_pattern, elements} - extract bindings from all elements
+  defp extract_pattern_bindings({:tuple_pattern, elements}, {:tuple, elem_types}, env)
+       when length(elements) == length(elem_types) do
+    Enum.zip(elements, elem_types)
+    |> Enum.flat_map(fn {el, t} -> extract_pattern_bindings(el, t, env) end)
+  end
   defp extract_pattern_bindings({:tuple_pattern, elements}, _type, env) do
     Enum.flat_map(elements, fn el -> extract_pattern_bindings(el, :any, env) end)
   end
 
   # Tuple from parser with location info: {:tuple, elements, loc}
+  defp extract_pattern_bindings({:tuple, elements, %Vaisto.Parser.Loc{}}, {:tuple, elem_types}, env)
+       when length(elements) == length(elem_types) do
+    Enum.zip(elements, elem_types)
+    |> Enum.flat_map(fn {el, t} -> extract_pattern_bindings(el, t, env) end)
+  end
   defp extract_pattern_bindings({:tuple, elements, %Vaisto.Parser.Loc{}}, _type, env) do
     Enum.flat_map(elements, fn el -> extract_pattern_bindings(el, :any, env) end)
   end
@@ -2070,6 +2080,32 @@ defmodule Vaisto.TypeChecker do
       missing = MapSet.difference(MapSet.new([true, false]), covered)
       if MapSet.size(missing) == 0, do: :ok,
       else: {:error, Errors.non_exhaustive_bool(missing |> MapSet.to_list() |> Enum.join(", "))}
+    end
+  end
+
+  # Tuple types: check result-like tag exhaustiveness (same as :any)
+  defp check_exhaustiveness(clauses, {:tuple, _}) do
+    has_catch_all = Enum.any?(clauses, fn {pattern, _body} ->
+      is_catch_all_pattern?(pattern)
+    end)
+
+    if has_catch_all do
+      :ok
+    else
+      tags = clauses
+        |> Enum.map(fn {pattern, _body} -> extract_tuple_tag(pattern) end)
+        |> Enum.filter(&(&1 != nil))
+        |> MapSet.new()
+
+      result_tags = MapSet.new([:ok, :error])
+      has_result_tags = not MapSet.disjoint?(tags, result_tags)
+      missing_result_tags = MapSet.difference(result_tags, tags)
+
+      if has_result_tags and MapSet.size(missing_result_tags) > 0 do
+        {:error, Errors.non_exhaustive_result(MapSet.to_list(missing_result_tags))}
+      else
+        :ok
+      end
     end
   end
 
@@ -2206,16 +2242,30 @@ defmodule Vaisto.TypeChecker do
     {:list_pattern, [], :any}
   end
 
-  # Tuple pattern: {:tuple_pattern, elements} → {:tuple_pattern, typed_elements, :any}
+  # Tuple pattern: {:tuple_pattern, elements} → {:tuple_pattern, typed_elements, tuple_type}
+  defp type_pattern({:tuple_pattern, elements}, {:tuple, elem_types}, env)
+       when length(elements) == length(elem_types) do
+    typed_elements = Enum.zip(elements, elem_types)
+      |> Enum.map(fn {el, t} -> type_pattern(el, t, env) end)
+    {:tuple_pattern, typed_elements, {:tuple, elem_types}}
+  end
   defp type_pattern({:tuple_pattern, elements}, _type, env) do
     typed_elements = Enum.map(elements, fn el -> type_pattern(el, :any, env) end)
-    {:tuple_pattern, typed_elements, :any}
+    elem_types = Enum.map(typed_elements, fn _ -> :any end)
+    {:tuple_pattern, typed_elements, {:tuple, elem_types}}
   end
 
   # Tuple from parser with location info: {:tuple, elements, loc}
+  defp type_pattern({:tuple, elements, %Vaisto.Parser.Loc{}}, {:tuple, elem_types}, env)
+       when length(elements) == length(elem_types) do
+    typed_elements = Enum.zip(elements, elem_types)
+      |> Enum.map(fn {el, t} -> type_pattern(el, t, env) end)
+    {:tuple_pattern, typed_elements, {:tuple, elem_types}}
+  end
   defp type_pattern({:tuple, elements, %Vaisto.Parser.Loc{}}, _type, env) do
     typed_elements = Enum.map(elements, fn el -> type_pattern(el, :any, env) end)
-    {:tuple_pattern, typed_elements, :any}
+    elem_types = Enum.map(typed_elements, fn _ -> :any end)
+    {:tuple_pattern, typed_elements, {:tuple, elem_types}}
   end
 
   # Cons pattern: {:cons, head, tail} → {:cons_pattern, typed_head, typed_tail, :any}
@@ -2423,15 +2473,20 @@ defmodule Vaisto.TypeChecker do
 
   defp check_bindings_s([{{:tuple_pattern, elements}, expr} | rest], ctx, acc) do
     case check_s(expr, ctx) do
-      {:ok, _type, typed_expr, ctx} ->
-        bindings = extract_pattern_bindings({:tuple_pattern, elements}, :any, ctx.env)
+      {:ok, expr_type, typed_expr, ctx} ->
+        bindings = extract_pattern_bindings({:tuple_pattern, elements}, expr_type, ctx.env)
         extended_ctx = %{ctx | env: Enum.reduce(bindings, ctx.env, fn {var, var_type}, e ->
           Map.put(e, var, var_type)
         end)}
-        typed_pattern = type_pattern({:tuple_pattern, elements}, :any, ctx.env)
-        check_bindings_s(rest, extended_ctx, [{typed_pattern, typed_expr, :any} | acc])
+        typed_pattern = type_pattern({:tuple_pattern, elements}, expr_type, ctx.env)
+        check_bindings_s(rest, extended_ctx, [{typed_pattern, typed_expr, expr_type} | acc])
       error -> error
     end
+  end
+
+  # Tuple from parser with location info in let bindings: (let [(tuple a b) expr] ...)
+  defp check_bindings_s([{{:tuple, elements, %Vaisto.Parser.Loc{}}, expr} | rest], ctx, acc) do
+    check_bindings_s([{{:tuple_pattern, elements}, expr} | rest], ctx, acc)
   end
 
   # Constructor pattern destructuring: (let [(Ok v) expr] body)
