@@ -889,9 +889,10 @@ defmodule Vaisto.TypeChecker do
   end
 
   # Guarded function definition: (defn name [params :when guard] :ret body)
-  defp check_impl_s({:defn, name, params, body, declared_ret_type, guard}, ctx) do
+  defp check_impl_s({:defn, name, params, body, raw_ret_type, guard}, ctx) do
     param_names = Enum.map(params, fn {n, _t} -> n end)
-    param_types = Enum.map(params, fn {_n, t} -> t end)
+    param_types = Enum.map(params, fn {_n, t} -> parse_type_expr(t) end)
+    declared_ret_type = parse_type_expr(raw_ret_type)
 
     {fresh_param_types, ctx} = freshen_any_params(param_types, ctx)
     eligible_tvars = fresh_param_types
@@ -929,9 +930,10 @@ defmodule Vaisto.TypeChecker do
   end
 
   # Function definition with return type
-  defp check_impl_s({:defn, name, params, body, declared_ret_type}, ctx) do
+  defp check_impl_s({:defn, name, params, body, raw_ret_type}, ctx) do
     param_names = Enum.map(params, fn {n, _t} -> n end)
-    param_types = Enum.map(params, fn {_n, t} -> t end)
+    param_types = Enum.map(params, fn {_n, t} -> parse_type_expr(t) end)
+    declared_ret_type = parse_type_expr(raw_ret_type)
 
     # Freshen :any params with tvars for polymorphic inference
     {fresh_param_types, ctx} = freshen_any_params(param_types, ctx)
@@ -1384,6 +1386,11 @@ defmodule Vaisto.TypeChecker do
   defp parse_type_expr({:call, :List, [elem_type]}), do: {:list, parse_type_expr(elem_type)}
   # List type with location: {:call, :List, [elem_type], loc} → {:list, elem_type}
   defp parse_type_expr({:call, :List, [elem_type], _loc}), do: {:list, parse_type_expr(elem_type)}
+  # Tuple type: {:call, :Tuple, types} → {:tuple, types}
+  defp parse_type_expr({:call, :Tuple, types}) when is_list(types),
+    do: {:tuple, Enum.map(types, &parse_type_expr/1)}
+  defp parse_type_expr({:call, :Tuple, types, _loc}) when is_list(types),
+    do: {:tuple, Enum.map(types, &parse_type_expr/1)}
   # Fallback
   defp parse_type_expr(other), do: other
 
@@ -3276,8 +3283,8 @@ defmodule Vaisto.TypeChecker do
   # Signature collection helpers
   defp collect_defn_signature(name, params, ret_type, env) do
     # Params are now [{:x, :int}, {:y, :int}] tuples
-    param_types = Enum.map(params, fn {_name, type} -> type end)
-    func_type = {:fn, param_types, ret_type}
+    param_types = Enum.map(params, fn {_name, type} -> parse_type_expr(type) end)
+    func_type = {:fn, param_types, parse_type_expr(ret_type)}
     Map.put(env, name, func_type)
   end
 

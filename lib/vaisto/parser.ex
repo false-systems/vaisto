@@ -767,6 +767,16 @@ defmodule Vaisto.Parser do
               make_defn(name, typed_params, body, :any, guard, loc)
             end
 
+          # Compound type annotation (List/Tuple/etc): (defn name [params] (Type ...) body ...)
+          [{:call, _, _, _} = type_expr | bodies] when length(bodies) >= 1 ->
+            if is_type_annotation?(type_expr) do
+              body = wrap_bodies(bodies, loc)
+              make_defn(name, typed_params, body, type_expr, guard, loc)
+            else
+              body = wrap_bodies(rest, loc)
+              make_defn(name, typed_params, body, :any, guard, loc)
+            end
+
           # Multiple body expressions (no type annotation): (defn name [params] body1 body2 ...)
           _ ->
             body = wrap_bodies(rest, loc)
