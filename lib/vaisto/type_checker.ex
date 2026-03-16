@@ -682,6 +682,15 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
+  # try/catch/after expression
+  defp check_impl_s({:try, body, catch_clauses, after_body}, ctx) do
+    with {:ok, body_type, typed_body, ctx} <- check_s(body, ctx),
+         {:ok, result_type, typed_catches, ctx} <- check_try_catches_s(catch_clauses, body_type, ctx),
+         {:ok, typed_after, ctx} <- check_try_after_s(after_body, ctx) do
+      {:ok, result_type, {:try, typed_body, typed_catches, typed_after, result_type}, ctx}
+    end
+  end
+
   # let binding
   defp check_impl_s({:let, bindings, body}, ctx) do
     case check_bindings_s(bindings, ctx, []) do
@@ -1817,6 +1826,7 @@ defmodule Vaisto.TypeChecker do
   defp typed_ast_type({:tuple, _, type}), do: type
   defp typed_ast_type({:map, _, type}), do: type
   defp typed_ast_type({:receive, _, type}), do: type
+  defp typed_ast_type({:try, _, _, _, type}), do: type
   defp typed_ast_type({:defn, _, _, _, type}), do: type
   defp typed_ast_type({:defn_multi, _, _, _, type}), do: type
   defp typed_ast_type({:deftype, _, _, _}), do: :unit
@@ -1866,6 +1876,13 @@ defmodule Vaisto.TypeChecker do
     do: {:match, apply_subst_to_ast(subst, expr), apply_subst_to_clauses(subst, clauses), C.apply_subst(subst, type)}
   defp apply_subst_to_ast(subst, {:receive, clauses, type}),
     do: {:receive, apply_subst_to_clauses(subst, clauses), C.apply_subst(subst, type)}
+  defp apply_subst_to_ast(subst, {:try, body, catches, after_body, type}) do
+    typed_catches = Enum.map(catches, fn {class, var, handler, htype} ->
+      {class, var, apply_subst_to_ast(subst, handler), C.apply_subst(subst, htype)}
+    end)
+    typed_after = if after_body, do: apply_subst_to_ast(subst, after_body), else: nil
+    {:try, apply_subst_to_ast(subst, body), typed_catches, typed_after, C.apply_subst(subst, type)}
+  end
   defp apply_subst_to_ast(subst, {:do, exprs, type}),
     do: {:do, apply_subst_to_asts(subst, exprs), C.apply_subst(subst, type)}
 
@@ -2764,6 +2781,42 @@ defmodule Vaisto.TypeChecker do
       {:ok, body_type, typed_body, ctx} ->
         {:ok, {typed_pattern, typed_body, body_type}, ctx}
       error -> error
+    end
+  end
+
+  # Try/catch clause checking
+  defp check_try_catches_s([], body_type, ctx), do: {:ok, body_type, [], ctx}
+
+  defp check_try_catches_s(clauses, body_type, ctx) do
+    result = Enum.reduce_while(clauses, {:ok, body_type, [], ctx}, fn {class, var, handler}, {:ok, acc_type, acc, ctx} ->
+      # Bind exception var as :any in extended env
+      extended_ctx = %{ctx | env: Map.put(ctx.env, var, :any)}
+
+      case check_s(handler, extended_ctx) do
+        {:ok, handler_type, typed_handler, ctx} ->
+          case unify_types_s(acc_type, handler_type, ctx) do
+            {:ok, unified, ctx} ->
+              typed_clause = {class, {:var, var, :any}, typed_handler, handler_type}
+              {:cont, {:ok, unified, [typed_clause | acc], ctx}}
+            {:error, _} ->
+              {:halt, {:error, Errors.try_branch_type_mismatch(acc_type, handler_type)}}
+          end
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+
+    case result do
+      {:ok, result_type, rev_clauses, ctx} -> {:ok, result_type, Enum.reverse(rev_clauses), ctx}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp check_try_after_s(nil, ctx), do: {:ok, nil, ctx}
+
+  defp check_try_after_s(after_body, ctx) do
+    case check_s(after_body, ctx) do
+      {:ok, _type, typed_after, ctx} -> {:ok, typed_after, ctx}
+      {:error, _} = err -> err
     end
   end
 

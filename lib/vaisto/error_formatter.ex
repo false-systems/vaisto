@@ -17,15 +17,6 @@ defmodule Vaisto.ErrorFormatter do
 
   alias Vaisto.Error
 
-  @type legacy_error :: %{
-    message: String.t(),
-    file: String.t() | nil,
-    line: pos_integer(),
-    col: pos_integer(),
-    span_length: pos_integer(),
-    hint: String.t() | nil
-  }
-
   @doc """
   Formats a structured Vaisto.Error with source context.
 
@@ -36,7 +27,7 @@ defmodule Vaisto.ErrorFormatter do
     * `:source_offset` - Number of lines to skip in source when showing context.
       Default: same as `:line_offset`
   """
-  @spec format(Error.t() | legacy_error(), String.t(), keyword()) :: String.t()
+  @spec format(Error.t() | String.t(), String.t(), keyword()) :: String.t()
   def format(error, source, opts \\ [])
 
   def format(%Error{} = error, source, opts) do
@@ -59,15 +50,6 @@ defmodule Vaisto.ErrorFormatter do
     |> Enum.join("\n")
   end
 
-  # Legacy map format for backwards compatibility
-  def format(%{message: _, line: _, col: _} = error, source, opts) do
-    line_offset = Keyword.get(opts, :line_offset, 0)
-    adjusted_error = %{error | line: error.line - line_offset}
-    source_offset = Keyword.get(opts, :source_offset, line_offset)
-    user_source_lines = source |> String.split("\n") |> Enum.drop(source_offset) |> Enum.join("\n")
-    format_legacy(adjusted_error, user_source_lines)
-  end
-
   # Plain string error - try to parse or return as-is
   def format(error, source, opts) when is_binary(error) do
     case parse_legacy_error(error) do
@@ -83,7 +65,7 @@ defmodule Vaisto.ErrorFormatter do
 
   Same as `format/3`.
   """
-  @spec format_all([Error.t() | legacy_error()], String.t(), keyword()) :: String.t()
+  @spec format_all([Error.t() | String.t()], String.t(), keyword()) :: String.t()
   def format_all(errors, source, opts \\ []) do
     errors
     |> Enum.map(&format(&1, source, opts))
@@ -105,7 +87,7 @@ defmodule Vaisto.ErrorFormatter do
   Parses a legacy error string like "file:line:col: message" into structured format.
   Returns nil if the string doesn't match the expected format.
   """
-  @spec parse_legacy_error(String.t()) :: legacy_error() | nil
+  @spec parse_legacy_error(String.t()) :: map() | nil
   def parse_legacy_error(error_string) do
     cond do
       # Format: "file:line:col: message"
@@ -255,77 +237,6 @@ defmodule Vaisto.ErrorFormatter do
   defp format_hint(%Error{hint: nil}), do: nil
   defp format_hint(%Error{hint: hint}) do
     IO.ANSI.format([:green, "  help: ", :reset, hint])
-    |> IO.iodata_to_binary()
-  end
-
-  # ============================================================================
-  # Legacy Format Support (for backwards compatibility)
-  # ============================================================================
-
-  defp format_legacy(error, source) do
-    lines = String.split(source, "\n")
-    line_content = Enum.at(lines, error.line - 1, "")
-
-    [
-      format_legacy_header(error),
-      format_legacy_location(error),
-      format_legacy_source_line(error, line_content),
-      format_legacy_pointer(error, line_content),
-      format_legacy_hint(error)
-    ]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.join("\n")
-  end
-
-  defp format_legacy_header(error) do
-    IO.ANSI.format([:red, :bright, "error", :reset, ": ", error.message])
-    |> IO.iodata_to_binary()
-  end
-
-  defp format_legacy_location(error) do
-    location = case error.file do
-      nil -> "#{error.line}:#{error.col}"
-      file -> "#{file}:#{error.line}:#{error.col}"
-    end
-
-    IO.ANSI.format([:blue, :bright, "  --> ", :reset, location])
-    |> IO.iodata_to_binary()
-  end
-
-  defp format_legacy_source_line(error, line_content) do
-    line_num = Integer.to_string(error.line)
-    padding = String.duplicate(" ", String.length(line_num))
-
-    [
-      IO.ANSI.format([:blue, :bright, "#{padding} |", :reset]) |> IO.iodata_to_binary(),
-      IO.ANSI.format([:blue, :bright, "#{line_num} |", :reset, " ", line_content])
-      |> IO.iodata_to_binary()
-    ]
-    |> Enum.join("\n")
-  end
-
-  defp format_legacy_pointer(error, line_content) do
-    line_num = Integer.to_string(error.line)
-    gutter_width = String.length(line_num)
-
-    prefix = String.slice(line_content, 0, error.col - 1)
-    visual_offset = visual_length(prefix)
-
-    span = Map.get(error, :span_length, 1)
-    pointer = String.duplicate("^", max(span, 1))
-    spacing = String.duplicate(" ", visual_offset)
-
-    IO.ANSI.format([
-      :blue, :bright, String.duplicate(" ", gutter_width), " | ",
-      :reset, spacing,
-      :red, :bright, pointer, :reset
-    ])
-    |> IO.iodata_to_binary()
-  end
-
-  defp format_legacy_hint(%{hint: nil}), do: nil
-  defp format_legacy_hint(%{hint: hint}) do
-    IO.ANSI.format([:blue, :bright, "  = ", :cyan, "hint", :reset, ": ", hint])
     |> IO.iodata_to_binary()
   end
 

@@ -243,6 +243,7 @@ defmodule Vaisto.Parser do
       [:cond | rest] -> parse_cond(rest, open_loc)
       [:let | rest] -> parse_let(rest, open_loc)
       [:match | rest] -> parse_match(rest, open_loc)
+      [:try | rest] -> parse_try(rest, open_loc)
       [:receive | rest] -> parse_receive(rest, open_loc)
       [:process | rest] -> parse_process(rest, open_loc)
       [:supervise | rest] -> parse_supervise(rest, open_loc)
@@ -704,6 +705,106 @@ defmodule Vaisto.Parser do
   end
   defp parse_receive([], loc) do
     {:error, Errors.parse_error("receive requires at least one clause: (receive [pattern body] ...)", span: Error.span_from_loc(loc)), loc}
+  end
+
+  # (try body [catch [:error e handler] ...] [after cleanup])
+  # At least one of catch/after is required
+  @valid_catch_classes [:error, :throw, :exit]
+
+  defp parse_try([], loc) do
+    {:error, Errors.parse_error("try requires a body and at least a catch or after block", span: Error.span_from_loc(loc)), loc}
+  end
+
+  defp parse_try(rest, loc) do
+    # Partition into body exprs, optional catch block, optional after block
+    {body_exprs, catch_block, after_block} = split_try_parts(rest)
+
+    cond do
+      body_exprs == [] ->
+        {:error, Errors.parse_error("try requires a body and at least a catch or after block", span: Error.span_from_loc(loc)), loc}
+
+      catch_block == nil and after_block == nil ->
+        {:error, Errors.parse_error("try requires at least a catch or after block", span: Error.span_from_loc(loc)), loc}
+
+      true ->
+        body = wrap_bodies(body_exprs, loc)
+        with {:ok, catch_clauses} <- parse_catch_block(catch_block, loc),
+             {:ok, after_body} <- parse_after_block(after_block, loc) do
+          {:try, body, catch_clauses, after_body, loc}
+        end
+    end
+  end
+
+  # Split rest into {body_exprs, catch_bracket_contents | nil, after_bracket_contents | nil}
+  defp split_try_parts(rest) do
+    # Scan from the end for [catch ...] and [after ...]
+    {after_block, rest1} = extract_trailing_block(rest, :after)
+    {catch_block, rest2} = extract_trailing_block(rest1, :catch)
+    {rest2, catch_block, after_block}
+  end
+
+  defp extract_trailing_block(list, tag) do
+    case List.last(list) do
+      {:bracket, [^tag | contents]} ->
+        {contents, List.delete_at(list, length(list) - 1)}
+      _ ->
+        {nil, list}
+    end
+  end
+
+  defp parse_catch_block(nil, _loc), do: {:ok, []}
+
+  defp parse_catch_block([], loc) do
+    {:error, Errors.parse_error("catch block requires at least one clause", span: Error.span_from_loc(loc)), loc}
+  end
+
+  defp parse_catch_block(clauses, loc) do
+    results = Enum.map(clauses, &parse_catch_clause(&1, loc))
+    case Enum.find(results, &match?({:error, _, _}, &1)) do
+      nil -> {:ok, Enum.map(results, fn {:ok, c} -> c end)}
+      err -> err
+    end
+  end
+
+  defp parse_catch_clause({:bracket, [{:atom, class} | rest]}, loc) do
+    cond do
+      class not in @valid_catch_classes ->
+        {:error, Errors.parse_error(
+          "invalid exception class :#{class}, must be :error, :throw, or :exit",
+          span: Error.span_from_loc(loc)), loc}
+
+      length(rest) < 2 ->
+        {:error, Errors.parse_error(
+          "catch clause requires [class var body]: [:error e handler]",
+          span: Error.span_from_loc(loc)), loc}
+
+      true ->
+        [var | bodies] = rest
+        body = wrap_bodies(bodies, loc)
+        {:ok, {class, var, body}}
+    end
+  end
+
+  defp parse_catch_clause({:bracket, _}, loc) do
+    {:error, Errors.parse_error(
+      "catch clause requires [class var body]: [:error e handler]",
+      span: Error.span_from_loc(loc)), loc}
+  end
+
+  defp parse_catch_clause(_, loc) do
+    {:error, Errors.parse_error(
+      "catch clause must be a bracket: [:error e handler]",
+      span: Error.span_from_loc(loc)), loc}
+  end
+
+  defp parse_after_block(nil, _loc), do: {:ok, nil}
+
+  defp parse_after_block([], loc) do
+    {:error, Errors.parse_error("after block requires a body", span: Error.span_from_loc(loc)), loc}
+  end
+
+  defp parse_after_block(exprs, loc) do
+    {:ok, wrap_bodies(exprs, loc)}
   end
 
   defp parse_process([name, initial_state | handlers], loc) when handlers != [] do

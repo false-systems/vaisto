@@ -760,4 +760,19 @@ defmodule Vaisto.Errors do
 
   defp format_instance_type(type) when is_atom(type), do: Atom.to_string(type)
   defp format_instance_type(type), do: Vaisto.TypeFormatter.format(type)
+
+  # ============================================================================
+  # Try/Catch Errors
+  # ============================================================================
+
+  @doc "Try body and catch handler return different types"
+  def try_branch_type_mismatch(body_type, handler_type, opts \\ []) do
+    Error.new("branch types must match",
+      Keyword.merge(opts, [
+        expected: body_type,
+        actual: handler_type,
+        note: "try body and catch handler must return the same type"
+      ])
+    )
+  end
 end

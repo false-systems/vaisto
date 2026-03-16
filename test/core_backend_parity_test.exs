@@ -675,4 +675,27 @@ defmodule Vaisto.CoreBackendParityTest do
       assert {:error, _} = core_result
     end
   end
+
+  # =============================================================================
+  # TRY/CATCH/AFTER
+  # =============================================================================
+
+  describe "try/catch" do
+    test "catch error" do
+      assert {:ok, :caught} = run_both(~s|(try (erlang:error :boom) [catch [:error e :caught]])|, "try_catch_error")
+    end
+
+    test "catch throw" do
+      assert {:ok, 42} = run_both(~s|(try (erlang:throw 42) [catch [:throw v v]])|, "try_catch_throw")
+    end
+
+    test "no exception passes through" do
+      assert {:ok, 42} = run_both(~s|(try 42 [catch [:error e 0]])|, "try_no_exception")
+    end
+
+    test "try/catch/after" do
+      code = "(do (erlang:put :after_ran false) (try 42 [catch [:error e 0]] [after (erlang:put :after_ran true)]) (erlang:get :after_ran))"
+      assert {:ok, true} = run_both(code, "try_catch_after")
+    end
+  end
 end

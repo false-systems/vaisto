@@ -111,6 +111,30 @@ defmodule Vaisto.Emitter do
     {:receive, [], [[do: clause_asts]]}
   end
 
+  # Try/catch/after → Elixir try
+  def to_elixir({:try, body, catches, after_body, _type}) do
+    body_ast = to_elixir(body)
+
+    catch_kw = if catches != [] do
+      catch_clauses = Enum.map(catches, fn {class, {:var, var_name, _}, handler, _htype} ->
+        var_ast = Macro.var(var_name, nil)
+        handler_ast = to_elixir(handler)
+        {:->, [], [[class, var_ast], handler_ast]}
+      end)
+      [catch: catch_clauses]
+    else
+      []
+    end
+
+    after_kw = if after_body do
+      [after: to_elixir(after_body)]
+    else
+      []
+    end
+
+    {:try, [], [[{:do, body_ast}] ++ catch_kw ++ after_kw]}
+  end
+
   # Do block → sequence of expressions, returning the last
   # (do expr1 expr2 expr3) → (expr1; expr2; expr3)
   def to_elixir({:do, exprs, _type}) do

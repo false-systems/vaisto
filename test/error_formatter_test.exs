@@ -4,74 +4,58 @@ defmodule Vaisto.ErrorFormatterTest do
 
   describe "format/2" do
     test "formats basic error with source context" do
-      error = %{
-        message: "type mismatch: expected Int, found Atom",
+      error = Vaisto.Error.new("type mismatch: expected Int, found Atom",
         file: "test.va",
-        line: 1,
-        col: 6,
-        span_length: 5,
-        hint: nil
-      }
+        span: %{line: 1, col: 6, length: 5}
+      )
       source = "(+ 1 :atom)"
 
       result = ErrorFormatter.format(error, source)
 
       assert result =~ "error"
       assert result =~ "type mismatch"
-      assert result =~ "test.va:1:6"
+      assert result =~ "test.va:1"
       assert result =~ "(+ 1 :atom)"
       assert result =~ "^^^^^"
     end
 
     test "formats error without file" do
-      error = %{
-        message: "undefined variable `x`",
-        file: nil,
-        line: 2,
-        col: 1,
-        span_length: 1,
-        hint: nil
-      }
+      error = Vaisto.Error.new("undefined variable `x`",
+        span: %{line: 2, col: 1, length: 1}
+      )
       source = "(+ 1 2)\nx"
 
       result = ErrorFormatter.format(error, source)
 
-      assert result =~ "2:1"
+      assert result =~ "line 2"
       # Should not have "filename:" prefix before location
-      refute result =~ ~r/\w+\.va:\d+:\d+/
+      refute result =~ ~r/\w+\.va:\d+/
     end
 
     test "includes hint when provided" do
-      error = %{
-        message: "unknown function `foo`",
+      error = Vaisto.Error.new("unknown function `foo`",
         file: "test.va",
-        line: 1,
-        col: 2,
-        span_length: 3,
+        span: %{line: 1, col: 2, length: 3},
         hint: "did you mean `for`?"
-      }
+      )
       source = "(foo 1 2)"
 
       result = ErrorFormatter.format(error, source)
 
-      assert result =~ "hint"
+      assert result =~ "help"
       assert result =~ "did you mean `for`?"
     end
 
     test "formats error on correct line in multiline source with span indicator" do
-      error = %{
-        message: "type error",
+      error = Vaisto.Error.new("type error",
         file: "test.va",
-        line: 3,
-        col: 4,
-        span_length: 3,
-        hint: nil
-      }
+        span: %{line: 3, col: 4, length: 3}
+      )
       source = "(defn add [x y]\n  (+ x\n     :bad))"
 
       result = ErrorFormatter.format(error, source)
 
-      assert result =~ "test.va:3:4"
+      assert result =~ "test.va:3"
       assert result =~ ":bad"
       assert result =~ "^^^"
     end
@@ -117,8 +101,8 @@ defmodule Vaisto.ErrorFormatterTest do
   describe "format_all/2" do
     test "formats multiple errors" do
       errors = [
-        %{message: "error 1", file: "a.va", line: 1, col: 1, span_length: 1, hint: nil},
-        %{message: "error 2", file: "a.va", line: 2, col: 1, span_length: 1, hint: nil}
+        Vaisto.Error.new("error 1", file: "a.va", span: %{line: 1, col: 1, length: 1}),
+        Vaisto.Error.new("error 2", file: "a.va", span: %{line: 2, col: 1, length: 1})
       ]
       source = "line1\nline2"
 
@@ -126,8 +110,8 @@ defmodule Vaisto.ErrorFormatterTest do
 
       assert result =~ "error 1"
       assert result =~ "error 2"
-      assert result =~ "a.va:1:1"
-      assert result =~ "a.va:2:1"
+      assert result =~ "a.va:1"
+      assert result =~ "a.va:2"
     end
   end
 

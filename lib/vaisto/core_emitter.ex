@@ -628,6 +628,84 @@ defmodule Vaisto.CoreEmitter do
     :cerl.c_receive(clause_cores, :cerl.c_atom(:infinity), :cerl.c_atom(:timeout))
   end
 
+  # Try/catch/after expression → Core Erlang try
+  defp to_core_expr({:try, body, catches, after_body, _type}, user_fns, local_vars) do
+    body_core = to_core_expr(body, user_fns, local_vars)
+    try_core = emit_core_try(body_core, catches, user_fns, local_vars)
+
+    case after_body do
+      nil -> try_core
+      _ -> emit_core_try_after(try_core, after_body, user_fns, local_vars)
+    end
+  end
+
+  # Emit a Core Erlang c_try with catch clauses
+  defp emit_core_try(body_core, [], _user_fns, _local_vars) do
+    # No catch clauses (after-only): success passes through, exceptions re-raise
+    success_var = :cerl.c_var(:_try_val)
+    class_var = :cerl.c_var(:_try_class)
+    value_var = :cerl.c_var(:_try_value)
+    stack_var = :cerl.c_var(:_try_stack)
+
+    reraise = :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:raise),
+      [class_var, value_var, stack_var])
+
+    :cerl.c_try(body_core, [success_var], success_var, [class_var, value_var, stack_var], reraise)
+  end
+
+  defp emit_core_try(body_core, catches, user_fns, local_vars) do
+    success_var = :cerl.c_var(:_try_val)
+    class_var = :cerl.c_var(:_try_class)
+    value_var = :cerl.c_var(:_try_value)
+    stack_var = :cerl.c_var(:_try_stack)
+
+    # Build catch clauses as a case on {class, value}
+    catch_clauses = Enum.map(catches, fn {class, {:var, var_name, _}, handler, _htype} ->
+      clause_local_vars = MapSet.put(local_vars, var_name)
+      handler_core = to_core_expr(handler, user_fns, clause_local_vars)
+      pattern = :cerl.c_tuple([:cerl.c_atom(class), :cerl.c_var(var_name)])
+      :cerl.c_clause([pattern], :cerl.c_atom(true), handler_core)
+    end)
+
+    # Catch-all: re-raise unmatched exceptions
+    catch_all_class = :cerl.c_var(:_catch_all_class)
+    catch_all_value = :cerl.c_var(:_catch_all_value)
+    reraise = :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:raise),
+      [class_var, catch_all_value, stack_var])
+    catch_all = :cerl.c_clause(
+      [:cerl.c_tuple([catch_all_class, catch_all_value])],
+      :cerl.c_atom(true),
+      reraise
+    )
+
+    catch_case = :cerl.c_case(
+      :cerl.c_tuple([class_var, value_var]),
+      catch_clauses ++ [catch_all]
+    )
+
+    :cerl.c_try(body_core, [success_var], success_var, [class_var, value_var, stack_var], catch_case)
+  end
+
+  # Wrap try in after: run after code on both success and exception paths
+  defp emit_core_try_after(try_core, after_body, user_fns, local_vars) do
+    after_core = to_core_expr(after_body, user_fns, local_vars)
+
+    result_var = :cerl.c_var(:_after_result)
+    class_var = :cerl.c_var(:_after_class)
+    value_var = :cerl.c_var(:_after_value)
+    stack_var = :cerl.c_var(:_after_stack)
+
+    # Success path: run after, return result
+    success_body = :cerl.c_seq(after_core, result_var)
+
+    # Exception path: run after, re-raise
+    reraise = :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:raise),
+      [class_var, value_var, stack_var])
+    exception_body = :cerl.c_seq(after_core, reraise)
+
+    :cerl.c_try(try_core, [result_var], success_body, [class_var, value_var, stack_var], exception_body)
+  end
+
   # Supervise expression → supervisor spec
   # returns {{Strategy, 1, 5}, [Children]}
   defp to_core_expr({:supervise, {:atom, strategy}, children, _type}, user_fns, local_vars) do
