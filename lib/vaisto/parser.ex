@@ -220,6 +220,8 @@ defmodule Vaisto.Parser do
       [:supervise | rest] -> parse_supervise(rest, open_loc)
       [:def | rest] -> parse_def(rest, open_loc)
       [:defn | rest] -> parse_defn(rest, open_loc)
+      [:defprompt | rest] -> parse_defprompt(rest, open_loc)
+      [:pipeline | rest] -> parse_pipeline(rest, open_loc)
       [:deftype | rest] -> parse_deftype(rest, open_loc)
       [:fn | rest] -> parse_fn(rest, open_loc)
       [:extern | rest] -> parse_extern(rest, open_loc)
@@ -250,6 +252,7 @@ defmodule Vaisto.Parser do
       [:"->>" | rest] -> parse_thread_last(rest, open_loc)
       # Field access: (. record :field) → {:field_access, record, :field, loc}
       [:. | rest] -> parse_field_access(rest, open_loc)
+      [:generate | rest] -> parse_generate(rest, open_loc)
       # Regular function call
       [func | args] -> {:call, func, args, open_loc}
       [] -> {:unit, open_loc}
@@ -713,6 +716,51 @@ defmodule Vaisto.Parser do
     {:error, Errors.parse_error("def has too many arguments", span: Error.span_from_loc(loc)), loc}
   end
 
+  defp parse_defprompt([name, {:atom, :input}, input_type, {:atom, :output}, output_type], loc) do
+    with {:ok, parsed_input} <- parse_type_ref(input_type),
+         {:ok, parsed_output} <- parse_type_ref(output_type) do
+      {:defprompt, name, parsed_input, parsed_output, loc}
+    else
+      {:error, msg} ->
+        {:error, Errors.parse_error("defprompt #{msg}", span: Error.span_from_loc(loc)), loc}
+    end
+  end
+
+  defp parse_defprompt(_args, loc) do
+    {:error, Errors.parse_error("defprompt requires syntax: (defprompt NAME :input TYPE :output TYPE)", span: Error.span_from_loc(loc)), loc}
+  end
+
+  defp parse_pipeline([name, {:atom, :input}, input_type, {:atom, :output}, output_type | ops], loc) when ops != [] do
+    with {:ok, parsed_input} <- parse_type_ref(input_type),
+         {:ok, parsed_output} <- parse_type_ref(output_type) do
+      {:pipeline, name, parsed_input, parsed_output, ops, loc}
+    else
+      {:error, msg} ->
+        {:error, Errors.parse_error("pipeline #{msg}", span: Error.span_from_loc(loc)), loc}
+    end
+  end
+
+  defp parse_pipeline([_name, {:atom, :input}, _input_type, {:atom, :output}, _output_type], loc) do
+    {:error, Errors.parse_error("pipeline requires at least one operator", span: Error.span_from_loc(loc)), loc}
+  end
+
+  defp parse_pipeline(_args, loc) do
+    {:error, Errors.parse_error("pipeline requires syntax: (pipeline NAME :input TYPE :output TYPE OP ...)", span: Error.span_from_loc(loc)), loc}
+  end
+
+  defp parse_generate([{:atom, :prompt}, prompt_name, {:atom, :extract}, extract_type], loc) do
+    with {:ok, parsed_extract} <- parse_type_ref(extract_type) do
+      {:generate, prompt_name, parsed_extract, loc}
+    else
+      {:error, msg} ->
+        {:error, Errors.parse_error("generate #{msg}", span: Error.span_from_loc(loc)), loc}
+    end
+  end
+
+  defp parse_generate(_args, loc) do
+    {:error, Errors.parse_error("generate requires syntax: (generate :prompt PROMPT_NAME :extract TYPE)", span: Error.span_from_loc(loc)), loc}
+  end
+
   # Multi-clause function definition
   # (defn len
   #   [[] 0]
@@ -844,6 +892,14 @@ defmodule Vaisto.Parser do
   # Unwrap {:atom, :int} → :int for type annotations
   defp unwrap_type({:atom, t}), do: t
   defp unwrap_type(t), do: t
+
+  defp parse_type_ref(type_ref) do
+    if is_type_annotation?(type_ref) do
+      {:ok, unwrap_type(type_ref)}
+    else
+      {:error, "requires a valid type reference"}
+    end
+  end
 
   # Left-to-right greedy scan: each param name optionally followed by a type annotation.
   # Supports mixed typed/untyped: [n :int xs] → [{:n, :int}, {:xs, :any}]
