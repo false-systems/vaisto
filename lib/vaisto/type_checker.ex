@@ -76,6 +76,9 @@ defmodule Vaisto.TypeChecker do
           | {:defn_multi, atom(), non_neg_integer(), [typed_clause()], vaisto_type()}
           | {:defval, atom(), typed_ast(), vaisto_type()}
           | {:deftype, atom(), {:product | :sum, term()}, vaisto_type()}
+          | {:defprompt, atom(), vaisto_type(), vaisto_type(), vaisto_type()}
+          | {:pipeline, atom(), vaisto_type(), vaisto_type(), [typed_ast()], vaisto_type()}
+          | {:generate, atom(), vaisto_type(), vaisto_type()}
           # Process/concurrency
           | {:process, atom(), typed_ast(), [typed_clause()], vaisto_type()}
           | {:supervise, term(), [typed_ast()], vaisto_type()}
@@ -888,6 +891,32 @@ defmodule Vaisto.TypeChecker do
     check_s({:deftype, name, {:product, fields}}, ctx)
   end
 
+  defp check_impl_s({:defprompt, name, raw_input_type, raw_output_type}, ctx) do
+    input_type = resolve_type_ref(raw_input_type, ctx.env)
+    output_type = resolve_type_ref(raw_output_type, ctx.env)
+
+    {:ok, :unit, {:defprompt, name, input_type, output_type, :unit}, ctx}
+  end
+
+  defp check_impl_s({:pipeline, name, raw_input_type, raw_output_type, ops}, ctx) do
+    input_type = resolve_type_ref(raw_input_type, ctx.env)
+    output_type = resolve_type_ref(raw_output_type, ctx.env)
+
+    with {:ok, typed_ops, final_payload_type, ctx} <- check_pipeline_ops_s(ops, input_type, ctx),
+         {:ok, ctx} <- TcCtx.unify(ctx, final_payload_type, output_type) do
+      {:ok, :unit, {:pipeline, name, input_type, output_type, typed_ops, :unit}, ctx}
+    end
+  end
+
+  defp check_impl_s({:generate, prompt_name, raw_extract_type}, ctx) do
+    extract_type = resolve_type_ref(raw_extract_type, ctx.env)
+
+    with {:ok, {_prompt_input_type, prompt_output_type}} <- lookup_prompt(prompt_name, ctx.env),
+         {:ok, ctx} <- TcCtx.unify(ctx, prompt_output_type, extract_type) do
+      {:ok, extract_type, {:generate, prompt_name, extract_type, extract_type}, ctx}
+    end
+  end
+
   # Guarded function definition: (defn name [params :when guard] :ret body)
   defp check_impl_s({:defn, name, params, body, raw_ret_type, guard}, ctx) do
     param_names = Enum.map(params, fn {n, _t} -> n end)
@@ -1420,9 +1449,48 @@ defmodule Vaisto.TypeChecker do
   # Fallback
   defp parse_type_expr(other), do: other
 
+  defp resolve_type_ref(type_ref, env) do
+    type_ref
+    |> parse_type_expr()
+    |> resolve_named_type(env)
+  end
+
+  defp resolve_named_type({:list, elem_type}, env), do: {:list, resolve_named_type(elem_type, env)}
+  defp resolve_named_type({:tuple, elem_types}, env), do: {:tuple, Enum.map(elem_types, &resolve_named_type(&1, env))}
+  defp resolve_named_type(type_name, env)
+       when is_atom(type_name) and type_name not in [:any, :int, :float, :num, :string, :bool, :atom, :unit] do
+    case Map.get(env, type_name) do
+      {:sum, _, _} = sum_type -> sum_type
+      {:record, _, _} = record_type -> record_type
+      {:fn, _, {:sum, _, _} = sum_type} -> sum_type
+      {:fn, _, {:record, _, _} = record_type} -> record_type
+      _ -> type_name
+    end
+  end
+
+  defp resolve_named_type(other, _env), do: other
+
+  defp lookup_prompt(name, env) do
+    prompts = Map.get(env, :__prompts__, %{})
+
+    case Map.get(prompts, name) do
+      nil -> {:error, Errors.unknown_expression({:prompt, name})}
+      prompt_type -> {:ok, prompt_type}
+    end
+  end
+
   # Strip location from fn AST nodes
   defp strip_fn_loc({:fn, params, body, %Vaisto.Parser.Loc{}}), do: {:fn, params, body}
   defp strip_fn_loc(other), do: other
+
+  defp check_pipeline_ops_s([], payload_type, ctx), do: {:ok, [], payload_type, ctx}
+  defp check_pipeline_ops_s([op | rest], _payload_type, ctx) do
+    # TODO: thread the current payload type into op checking once operators consume input payloads.
+    with {:ok, next_payload_type, typed_op, ctx} <- check_s(op, ctx),
+         {:ok, typed_rest, final_payload_type, ctx} <- check_pipeline_ops_s(rest, next_payload_type, ctx) do
+      {:ok, [typed_op | typed_rest], final_payload_type, ctx}
+    end
+  end
 
   # Add location to error messages — enhance errors with line/column
 
@@ -1703,6 +1771,9 @@ defmodule Vaisto.TypeChecker do
   defp typed_ast_type({:defn, _, _, _, type}), do: type
   defp typed_ast_type({:defn_multi, _, _, _, type}), do: type
   defp typed_ast_type({:deftype, _, _, _}), do: :unit
+  defp typed_ast_type({:defprompt, _, _, _, type}), do: type
+  defp typed_ast_type({:pipeline, _, _, _, _, type}), do: type
+  defp typed_ast_type({:generate, _, _, type}), do: type
   defp typed_ast_type({:process, _, _, _, type}), do: type
   defp typed_ast_type({:field_access, _, _, type}), do: type
   defp typed_ast_type({:field_access, _, _, type, _}), do: type
@@ -1769,6 +1840,11 @@ defmodule Vaisto.TypeChecker do
   defp apply_subst_to_ast(subst, {:defval, name, value, type}),
     do: {:defval, name, apply_subst_to_ast(subst, value), C.apply_subst(subst, type)}
   defp apply_subst_to_ast(_subst, {:deftype, _, _, _} = node), do: node
+  defp apply_subst_to_ast(_subst, {:defprompt, _, _, _, _} = node), do: node
+  defp apply_subst_to_ast(subst, {:pipeline, name, input_type, output_type, ops, type}),
+    do: {:pipeline, name, C.apply_subst(subst, input_type), C.apply_subst(subst, output_type), apply_subst_to_asts(subst, ops), C.apply_subst(subst, type)}
+  defp apply_subst_to_ast(subst, {:generate, prompt_name, extract_type, type}),
+    do: {:generate, prompt_name, C.apply_subst(subst, extract_type), C.apply_subst(subst, type)}
 
   # Process/concurrency
   defp apply_subst_to_ast(subst, {:process, name, init, handlers, type}),
@@ -3252,6 +3328,12 @@ defmodule Vaisto.TypeChecker do
         {:deftype, name, fields} ->
           collect_deftype_signature(name, fields, acc_env)
 
+        {:defprompt, name, input_type, output_type, %Vaisto.Parser.Loc{}} ->
+          collect_defprompt_signature(name, input_type, output_type, acc_env)
+
+        {:defprompt, name, input_type, output_type} ->
+          collect_defprompt_signature(name, input_type, output_type, acc_env)
+
         {:process, name, initial_state, handlers, %Vaisto.Parser.Loc{}} ->
           collect_process_signature(name, initial_state, handlers, acc_env)
 
@@ -3333,6 +3415,12 @@ defmodule Vaisto.TypeChecker do
     # each clause has one pattern matching one arg.
     func_type = {:fn, [:any], :any}
     Map.put(env, name, func_type)
+  end
+
+  defp collect_defprompt_signature(name, input_type, output_type, env) do
+    prompts = Map.get(env, :__prompts__, %{})
+    prompt_types = {resolve_type_ref(input_type, env), resolve_type_ref(output_type, env)}
+    Map.put(env, :__prompts__, Map.put(prompts, name, prompt_types))
   end
 
   defp collect_deftype_signature(name, {:product, fields}, env) do
@@ -3645,6 +3733,10 @@ defmodule Vaisto.TypeChecker do
           constructor_type = {:fn, field_types, sum_type}
           Map.put(acc_env, ctor_name, constructor_type)
         end)
+
+      {:defprompt, name, input_type, output_type, :unit} ->
+        prompts = Map.get(env, :__prompts__, %{})
+        Map.put(env, :__prompts__, Map.put(prompts, name, {input_type, output_type}))
 
       {:defn, name, _params, _body, _func_type} ->
         # Use check_type (may be {:forall, ...} scheme) if available
