@@ -1,100 +1,141 @@
 # Vaisto
 
-**Finnish for "intuition"** — a statically-typed Scheme for the BEAM.
+**Finnish for "intuition"** — a typed substrate for LLM operations.
 
-## What is this?
+## The problem
 
-Vaisto is a programming language that combines:
-- **Scheme** — minimal s-expression syntax
-- **ML/Rust** — Hindley-Milner type inference
-- **Erlang** — BEAM runtime, OTP patterns
+LangChain pipelines written in 2023 don't run in 2026. Not because the code rotted — because the abstractions did. The model API changed, the recommended retrieval pattern changed, the wrapper library rewrote its surface twice. The pipeline you wrote is a fossil of when its dependencies were stable, which was never.
 
-The insight: Rust's type system without ownership. BEAM's process isolation makes the borrow checker unnecessary. You get safety through the runtime, not the compiler fighting you.
+Every domain that built durable software found a layer that survives churn beneath it. Operating systems found POSIX. Networks found sockets. Databases found relational algebra. LLM systems don't have one yet — so they break.
 
-## The Pitch
+## The missing layer
 
-```scheme
-; A typed process - seven lines
-(process counter 0
-  :increment (+ state 1)
-  :get state)
+What 2023 pipelines lacked was a **task contract** separable from its implementation: a description of the work the pipeline performs that does not name the model performing it.
 
-; Supervision as syntax - three lines
-(supervise :one_for_one
-  (counter 0))
+A task contract specifies what good enough looks like — typed inputs, typed outputs, declared budgets, declared failure semantics. Any model that meets the contract is a legal binding. As models improve, more models become legal bindings. The contract never has to change, because the contract was never about a model.
+
+## Where Vaisto fits
+
+Vaisto is the typed substrate that makes those contracts compile and compose. You don't write Vaisto code as a programming language — you write task contracts (in whatever surface fits your team) and they compile to Vaisto's algebraic IR, which the type checker and runtime then make real.
+
+```mermaid
+graph TB
+    Surfaces["<b>User surfaces</b><br/>Native S-exp · Python lib · declarative formats"]
+    IR["<b>Vaisto IR</b><br/>typed task contracts · algebraic closure"]
+    Runtime["<b>BEAM runtime</b><br/>process isolation · supervision · hot reload"]
+    Resources["<b>Resources</b><br/>model catalog · tools · retrievers"]
+
+    Surfaces --> IR
+    IR --> Runtime
+    Runtime --> Resources
 ```
 
-That's it. Fault-tolerant, typed, distributed-ready.
+This means:
+- **Closure is enforced by the compiler**, not by convention. A pipeline that doesn't compose refuses to compile.
+- **Failures are typed and supervised** at the BEAM runtime level. Rate-limits, timeouts, malformed extracts surface as typed events, not stack traces.
+- **Implementations can change** — model, prompt, tool — without rewriting the contracts that depend on them.
 
-In Elixir, this would be ~50 lines across multiple modules. In Kubernetes, add YAML. In Vaisto, it's the code above.
+## What the compiler catches
+
+A prompt declares its response schema, and a pipeline binds against it:
+
+```scheme
+(deftype Question [text :String])
+(deftype CitedAnswer [text :String evidence (List DocId)])
+(deftype Answer [text :String evidence (List DocId)])
+
+(defprompt answer-with-citations
+  :input  Question
+  :output CitedAnswer
+  :template """
+  Answer with citations.
+  Question: {text}
+  """)
+
+(pipeline legal-qa
+  :input  Question
+  :output Answer
+  (generate :prompt answer-with-citations :extract Answer))
+```
+
+Someone "improves" the prompt to drop citations:
+
+```scheme
+(deftype CitedAnswer [text :String])    ; ← evidence field removed
+```
+
+The compiler refuses to compile, before the change reaches production:
+
+```
+error: prompt output type mismatch
+  at line 6
+      (generate :prompt answer-with-citations :extract Answer)
+      ^ expected `Answer`, found `CitedAnswer`
+  note: prompt `answer-with-citations` output CitedAnswer
+        does not satisfy extract target Answer
+  note: missing field: evidence : (List DocId)
+```
+
+A class of failure that today reaches production silently becomes a compile error.
+
+→ For the full thesis, see [docs/design/task-contracts-manifesto.md](docs/design/task-contracts-manifesto.md).
 
 ## Status
 
-**Very early.** This is a working skeleton:
-- ✅ Parser (s-expressions → AST)
-- ✅ Type checker (basic inference)
-- ✅ Core Erlang emitter (AST → BEAM)
+Early. Working core:
+- ✅ Parser (s-expressions → AST, multi-line heredocs)
+- ✅ Type checker (Hindley-Milner inference, prompt-output unification)
+- ✅ Elixir backend (compiles pipelines to runnable functions)
+- ✅ Core Erlang backend (alternative compilation target)
 - ✅ LSP server (hover, diagnostics, symbols)
 - ✅ VS Code extension
-- 🚧 Full Hindley-Milner inference
-- 🚧 Complete OTP mapping
-- 🚧 REPL
+- ✅ Mock LLM provider for tests
+- ✅ OpenAI provider via `:httpc` with structured outputs
 
-## Installation
+Roadmap:
+- 🚧 Cost-based optimizer for `:model auto` binding
+- 🚧 Model catalog (cost/quality profiles)
+- 🚧 Additional operators (`verify`, `retrieve`, `tool`, `parallel`)
+- 🚧 Non-native user surfaces (Python library, declarative formats)
+
+## Quickstart
 
 ```bash
-git clone <repo>
+git clone https://github.com/yairfalse/vaisto.git
 cd vaisto
 mix deps.get
 mix test
 ```
 
-## Usage
+Build the CLI:
 
-```elixir
-# In iex
-iex> Vaisto.Parser.parse("(+ 1 2)")
-{:call, :+, [1, 2]}
-
-iex> Vaisto.Parser.parse("(+ 1 (* 2 3))")
-{:call, :+, [1, {:call, :*, [2, 3]}]}
+```bash
+mix escript.build
+./vaistoc --eval "(+ 1 2)"
+./vaistoc build src/ -o build/
+./vaistoc repl
 ```
 
-## Editor Support (VS Code)
+Run a pipeline against the OpenAI provider:
+
+```elixir
+# In iex -S mix
+iex> Application.put_env(:vaisto, :llm, Vaisto.LLM.OpenAI)
+iex> System.put_env("OPENAI_API_KEY", "sk-...")
+# (then compile and call your pipeline as usual)
+```
+
+## Editor support (VS Code)
 
 Vaisto has an LSP server and VS Code extension for real-time type feedback.
 
-### Quick Setup
-
 ```bash
-# 1. Build the compiler
 mix escript.build
-
-# 2. Install the VS Code extension
 cd editors/vscode
 npm install
 ```
 
-Then open `editors/vscode` in VS Code and press **F5** to launch the Extension Development Host. Open any `.va` file to get:
-
-| Feature | Shortcut | What it does |
-|---------|----------|--------------|
-| **Hover** | Mouse over | Shows type: `(Int, Int) -> Int` |
-| **Diagnostics** | Automatic | Red squiggles for type/parse errors |
-| **Symbols** | `Cmd+Shift+O` | Jump to functions, types, processes |
-
-### Example
-
-```scheme
-; test.va
-(defn add [a :int b :int] :int
-  (+ a b))
-
-(let [x 42]
-  (add x 1))  ; Hover here → (Int, Int) -> Int
-```
-
-### Configuration
+Open `editors/vscode` in VS Code and press **F5** to launch the Extension Development Host. Open any `.va` file to get hover types, diagnostics, and symbol navigation.
 
 If `vaistoc` isn't in your PATH, add to VS Code settings:
 
@@ -104,48 +145,21 @@ If `vaistoc` isn't in your PATH, add to VS Code settings:
 }
 ```
 
-## Compilation Pipeline
-
-```
-Vaisto source → AST → Type checker → Typed AST → Core Erlang → BEAM bytecode
-```
-
-1. **Parser**: text → AST
-2. **Type checker**: AST → Typed AST (or error)
-3. **Core Emitter**: Typed AST → Core Erlang
-4. **Erlang compiler**: Core Erlang → BEAM bytecode
-
-## Why?
-
-Modern distributed systems need fault tolerance, but the languages that offer it (Erlang, Elixir) don't give you compile-time guarantees about your data shapes. You find out at runtime.
-
-Meanwhile, the typed languages (Rust, Haskell) make concurrency hard.
-
-Vaisto says: why not both?
-
-## Design Principles
-
-1. **Types without annotations** — inference handles it
-2. **Supervision as syntax** — fault tolerance isn't a library
-3. **Contracts across services** — if message types don't match, fail at compile time
-4. **BEAM native** — processes, distribution, hot code reload
-
-## The Vision
+## Stack
 
 | Layer | Tool | Purpose |
 |-------|------|---------|
-| Language | Vaisto | Type-checked services |
-| Runtime | Korva | Simple orchestration |
-| Observability | AHTI | Causality correlation |
-| Deployment | SYKLI | CI that understands |
+| Substrate | **Vaisto** | Typed IR for task contracts |
+| Runtime | **BEAM** | Process isolation, supervision, distribution |
+| Observability | **AHTI** | Causality correlation across operations |
+| Deployment | **SYKLI** | CI for systems built on contracts |
 
-## Related Work
+## Related work
 
-- **LFE** — Lisp on BEAM, untyped
-- **Gleam** — Typed on BEAM, not Lisp
-- **Typed Racket** — Typed Scheme, not BEAM
-
-Vaisto fills the gap: typed + Lisp + BEAM.
+- **DSPy** — Python, optimizer for prompt-tuning. No structural closure, no runtime supervision.
+- **LangChain / LlamaIndex** — composition by convention. The thing this is in tension with.
+- **Gleam** — typed BEAM, ML-style syntax. Real production language; closer architectural cousin (we share BEAM, differ on syntax and type-system shape).
+- **LFE** — Lisp on BEAM, untyped. Same syntax family, no type system.
 
 ## Origin
 
