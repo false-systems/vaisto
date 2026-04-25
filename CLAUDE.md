@@ -61,6 +61,9 @@ Orchestrated by `Vaisto.Compilation.compile/3`. The `Vaisto.Backend` behaviour d
 | `Vaisto.Build` | Multi-file builds: dependency graph, topological sort, `.vsi` interface files |
 | `Vaisto.Interface` | Module interface serialization (Erlang `term_to_binary`) for separate compilation |
 | `Vaisto.TypeFormatter` | Formats types for display: `format(:int)` → `"Int"`. Used by errors, LSP hover, diagnostics. |
+| `Vaisto.LLM` | Behaviour + dispatcher. `call/4` looks up the provider via `Application.get_env(:vaisto, :llm, Vaisto.LLM.Mock)`. |
+| `Vaisto.LLM.Mock` | Test provider — returns canned responses for deterministic tests. |
+| `Vaisto.LLM.OpenAI` | Production provider via `:httpc` with structured outputs (Responses API). |
 
 ### Two Type Checkers — Important
 
@@ -159,6 +162,19 @@ Dictionary-passing implementation:
 
 Files in `std/` contain standard library modules with `.vsi` interface files for separate compilation.
 
+### Task Contracts
+
+Task contracts (`defprompt`, `pipeline`, `generate`) are typed surfaces over LLM operations. The type checker enforces structural compatibility between a prompt's `:output` type and a downstream `(generate :extract T)` — fields missing from the prompt's output but required by the extract target produce `prompt_output_mismatch` errors with field-level diffs (this is the headline compile error in the README).
+
+Compilation is asymmetric across backends: `defprompt` is metadata-only, and `pipeline` / `generate` emit runtime calls into `Vaisto.LLM.call/4` via **`Vaisto.Emitter` only**. `Vaisto.CoreEmitter` does not handle these forms — pipelines containing `generate` cannot target `:core` today. The provider is selected at runtime via `Application.put_env(:vaisto, :llm, Vaisto.LLM.OpenAI)` (default: `Vaisto.LLM.Mock`).
+
+Typed AST shapes:
+```elixir
+{:defprompt, name, input_type, output_type, template, :unit}
+{:pipeline, name, input_type, output_type, typed_ops, :unit}
+{:generate, prompt_name, extract_type, type}
+```
+
 ## Language Features
 
 ```scheme
@@ -184,6 +200,21 @@ Files in `std/` contain standard library modules with `.vsi` interface files for
 
 ; Pattern matching
 (match result [(Ok v) v] [(Err e) default])
+
+; Task contracts — typed prompts and pipelines (Elixir backend only)
+(deftype Question [text :String])
+(deftype Answer [text :String])
+(defprompt qa
+  :input  Question
+  :output Answer
+  :template """
+  Answer concisely.
+  Question: {text}
+  """)
+(pipeline simple-qa
+  :input  Question
+  :output Answer
+  (generate :prompt qa :extract Answer))
 
 ; Process definition (typed, compiles to GenServer or raw spawn loop)
 (process counter 0
@@ -234,7 +265,7 @@ Errors follow Rust's style: short, exact, with source context and actionable hin
 
 ## Testing
 
-~1240 tests across ~42 files. Key test files:
+~1270 tests across 49 files. Key test files:
 - `typeclass_test.exs` (120+) — typeclasses, constraints, deriving, both backends
 - `type_system/infer_test.exs` (122) — Algorithm W
 - `core_backend_parity_test.exs` (81+) — runs same code through both backends, compares results
@@ -242,6 +273,7 @@ Errors follow Rust's style: short, exact, with source context and actionable hin
 - `type_checker_test.exs` (66) — type checking, error messages, HM inference, lambda fallback
 - `tuple_types_test.exs` — `(Tuple ...)` annotations and inference
 - `try_catch_test.exs` — parser, type checker, and e2e tests for try/catch/after (both backends)
+- `task_contract_parser_test.exs`, `task_contract_typecheck_test.exs`, `emitter_task_contract_test.exs` — `defprompt`/`pipeline`/`generate` (parser, type checker, Elixir-backend e2e)
 
 ### Test Helpers
 
