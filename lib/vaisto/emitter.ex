@@ -460,6 +460,28 @@ defmodule Vaisto.Emitter do
     {:__block__, [], clause_defs}
   end
 
+  # Prompt definitions are compile-time only; pipelines consume their metadata.
+  def to_elixir({:defprompt, _name, _input_type, _output_type, _template, _type}) do
+    nil
+  end
+
+  # Pipeline definition → Elixir def returning {:ok, payload} | {:error, reason}
+  def to_elixir({:pipeline, name, input_type, _output_type, ops, _type}) do
+    input_var = Macro.var(:payload, nil)
+    body_ast = emit_pipeline_ops(input_var, input_type, ops)
+
+    quote do
+      def unquote(name)(unquote(input_var)) do
+        unquote(body_ast)
+      end
+    end
+  end
+
+  # generate is only valid inside pipeline emission, where the current payload/type is known.
+  def to_elixir({:generate, _prompt_name, _extract_type, _type}) do
+    throw({:vaisto_error, Errors.compilation_error("`generate` can only be emitted inside a pipeline")})
+  end
+
   # Record construction → tagged tuple {:record_name, field1, field2, ...}
   def to_elixir({:call, name, args, {:record, name, _fields}}) do
     typed_args = Enum.map(args, &to_elixir/1)
@@ -652,11 +674,19 @@ defmodule Vaisto.Emitter do
   # or a single module with user-defined functions + main
   def compile({:module, _forms} = module_ast, module_name) do
     Process.put(:vaisto_compile_context, %{parent_module: module_name})
+    # Prompt metadata is needed during emission of pipeline ops without widening
+    # the public emitter API. Thread it explicitly if this starts to sprawl.
+    Process.put(:__vaisto_prompt_registry__, collect_prompt_registry(module_ast))
 
     try do
-      compile_module(module_ast, module_name)
-    after
-      Process.delete(:vaisto_compile_context)
+      try do
+        compile_module(module_ast, module_name)
+      after
+        Process.delete(:vaisto_compile_context)
+        Process.delete(:__vaisto_prompt_registry__)
+      end
+    catch
+      {:vaisto_error, %Vaisto.Error{} = error} -> {:error, error}
     end
   end
 
@@ -681,90 +711,96 @@ defmodule Vaisto.Emitter do
 
   # Single guarded defn compilation
   def compile({:defn, name, _params, _body, _type, _guard} = defn_ast, module_name) do
-    elixir_ast = to_elixir(defn_ast)
-
-    module_ast = if name == :main do
-      quote do
-        defmodule unquote(module_name) do
-          unquote(elixir_ast)
-        end
-      end
-    else
-      quote do
-        defmodule unquote(module_name) do
-          unquote(elixir_ast)
-          def main, do: unquote(name)()
-        end
-      end
-    end
-
     try do
+      elixir_ast = to_elixir(defn_ast)
+      module_ast = if name == :main do
+        quote do
+          defmodule unquote(module_name) do
+            unquote(elixir_ast)
+          end
+        end
+      else
+        quote do
+          defmodule unquote(module_name) do
+            unquote(elixir_ast)
+            def main, do: unquote(name)()
+          end
+        end
+      end
+
       [{^module_name, bytecode}] = Code.compile_quoted(module_ast)
       {:ok, module_name, bytecode}
     rescue
       e -> {:error, Errors.compilation_error(Exception.message(e))}
+    catch
+      {:vaisto_error, %Vaisto.Error{} = error} -> {:error, error}
     end
   end
 
   # Single defn compilation - place function in module with main as entry point
   def compile({:defn, name, _params, _body, _type} = defn_ast, module_name) do
-    elixir_ast = to_elixir(defn_ast)
-
-    # If the function is named "main", use it directly. Otherwise add a main that calls it.
-    module_ast = if name == :main do
-      quote do
-        defmodule unquote(module_name) do
-          unquote(elixir_ast)
-        end
-      end
-    else
-      quote do
-        defmodule unquote(module_name) do
-          unquote(elixir_ast)
-          def main, do: unquote(name)()
-        end
-      end
-    end
-
     try do
+      elixir_ast = to_elixir(defn_ast)
+
+      # If the function is named "main", use it directly. Otherwise add a main that calls it.
+      module_ast = if name == :main do
+        quote do
+          defmodule unquote(module_name) do
+            unquote(elixir_ast)
+          end
+        end
+      else
+        quote do
+          defmodule unquote(module_name) do
+            unquote(elixir_ast)
+            def main, do: unquote(name)()
+          end
+        end
+      end
+
       [{^module_name, bytecode}] = Code.compile_quoted(module_ast)
       {:ok, module_name, bytecode}
     rescue
       e -> {:error, Errors.compilation_error(Exception.message(e))}
+    catch
+      {:vaisto_error, %Vaisto.Error{} = error} -> {:error, error}
     end
   end
 
   # Single defval compilation - wrap in module with zero-arity function
   def compile({:defval, name, _value, _type} = defval_ast, module_name) do
-    elixir_ast = to_elixir(defval_ast)
-
-    module_ast = quote do
-      defmodule unquote(module_name) do
-        unquote(elixir_ast)
-        def main, do: unquote(name)()
-      end
-    end
-
     try do
+      elixir_ast = to_elixir(defval_ast)
+      module_ast = quote do
+        defmodule unquote(module_name) do
+          unquote(elixir_ast)
+          def main, do: unquote(name)()
+        end
+      end
+
       [{^module_name, bytecode}] = Code.compile_quoted(module_ast)
       {:ok, module_name, bytecode}
     rescue
       e -> {:error, Errors.compilation_error(Exception.message(e))}
+    catch
+      {:vaisto_error, %Vaisto.Error{} = error} -> {:error, error}
     end
   end
 
   # Single expression compilation - wrap in module
   def compile(typed_ast, module_name) do
-    elixir_ast = to_elixir(typed_ast)
-
-    # Wrap expression in a module with a main/0 function
-    module_ast = wrap_in_module(elixir_ast, module_name)
-
     try do
+      elixir_ast = to_elixir(typed_ast)
+
+      # Wrap expression in a module with a main/0 function
+      module_ast = wrap_in_module(elixir_ast, module_name)
+
       [{^module_name, bytecode}] = Code.compile_quoted(module_ast)
       {:ok, module_name, bytecode}
     rescue
       e -> {:error, Errors.compilation_error(Exception.message(e))}
+    catch
+      {:vaisto_error, %Vaisto.Error{} = error} -> {:error, error}
     end
   end
 
@@ -858,6 +894,8 @@ defmodule Vaisto.Emitter do
       {:ok, module_name, main_results ++ standalone_results}
     rescue
       e -> {:error, Errors.compilation_error(Exception.message(e))}
+    catch
+      {:vaisto_error, %Vaisto.Error{} = error} -> {:error, error}
     end
   end
 
@@ -906,6 +944,163 @@ defmodule Vaisto.Emitter do
       end
     end
   end
+
+  defp emit_pipeline_ops(payload_var, _payload_type, []) do
+    quote do
+      {:ok, unquote(payload_var)}
+    end
+  end
+
+  defp emit_pipeline_ops(payload_var, payload_type, [{:generate, prompt_name, extract_type, _type} | rest]) do
+    next_payload_var = Macro.var(:pipeline_payload, nil)
+    op_ast = emit_generate(prompt_name, extract_type, payload_type, payload_var)
+    rest_ast = emit_pipeline_ops(next_payload_var, extract_type, rest)
+
+    quote do
+      case unquote(op_ast) do
+        {:ok, unquote(next_payload_var)} ->
+          unquote(rest_ast)
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp emit_generate(prompt_name, extract_type, payload_type, payload_var) do
+    prompt = fetch_prompt!(prompt_name)
+    template = Map.fetch!(prompt, :template)
+
+    if is_nil(template) do
+      throw({:vaisto_error, Errors.prompt_missing_template(prompt_name)})
+    end
+
+    payload_map_var = Macro.var(:payload_map, nil)
+    prompt_text_var = Macro.var(:prompt_text, nil)
+    response_map_var = Macro.var(:response_map, nil)
+
+    payload_map_ast = emit_runtime_to_map(payload_var, payload_type)
+    prompt_text_ast = emit_template_interpolation(template, payload_map_var)
+    response_value_ast = emit_map_to_runtime(response_map_var, extract_type)
+    type_literal = Macro.escape(extract_type)
+
+    quote do
+      unquote(payload_map_var) = unquote(payload_map_ast)
+      unquote(prompt_text_var) = unquote(prompt_text_ast)
+
+      case Vaisto.LLM.call(unquote(prompt_text_var), unquote(payload_map_var), unquote(type_literal), []) do
+        {:ok, unquote(response_map_var)} ->
+          {:ok, unquote(response_value_ast)}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp fetch_prompt!(prompt_name) do
+    prompt_registry = Process.get(:__vaisto_prompt_registry__, %{})
+
+    case Map.get(prompt_registry, prompt_name) do
+      nil ->
+        throw({:vaisto_error, Errors.undefined_prompt(prompt_name, Map.keys(prompt_registry))})
+
+      prompt ->
+        prompt
+    end
+  end
+
+  defp collect_prompt_registry({:module, forms}) do
+    forms
+    |> Enum.filter(&match?({:defprompt, _, _, _, _, _}, &1))
+    |> Map.new(fn {:defprompt, name, input_type, output_type, template, _type} ->
+      {name, %{input_type: input_type, output_type: output_type, template: template}}
+    end)
+  end
+
+  defp emit_template_interpolation(template, payload_map_var) do
+    placeholders =
+      ~r/\{([^}]+)\}/
+      |> Regex.scan(template, capture: :all_but_first)
+      |> List.flatten()
+      |> Enum.uniq()
+
+    Enum.reduce(placeholders, template, fn field_name, acc ->
+      field_atom = String.to_atom(field_name)
+
+      quote do
+        String.replace(
+          unquote(acc),
+          unquote("{#{field_name}}"),
+          Kernel.to_string(Map.fetch!(unquote(payload_map_var), unquote(field_atom)))
+        )
+      end
+    end)
+  end
+
+  defp emit_runtime_to_map(runtime_ast, {:record, _name, fields}) do
+    map_pairs =
+      fields
+      |> Enum.with_index(1)
+      |> Enum.map(fn {{field_name, field_type}, idx} ->
+        field_value = quote do: elem(unquote(runtime_ast), unquote(idx))
+        {field_name, emit_runtime_value_to_map(field_value, field_type)}
+      end)
+
+    {:%{}, [], map_pairs}
+  end
+
+  defp emit_runtime_to_map(runtime_ast, _type), do: runtime_ast
+
+  defp emit_runtime_value_to_map(runtime_ast, {:record, _name, fields}) do
+    emit_runtime_to_map(runtime_ast, {:record, nil, fields})
+  end
+
+  defp emit_runtime_value_to_map(runtime_ast, {:list, {:record, _name, fields}}) do
+    quote do
+      Enum.map(unquote(runtime_ast), fn item ->
+        unquote(emit_runtime_to_map(Macro.var(:item, nil), {:record, nil, fields}))
+      end)
+    end
+  end
+
+  defp emit_runtime_value_to_map(runtime_ast, {:list, _elem_type}) do
+    runtime_ast
+  end
+
+  defp emit_runtime_value_to_map(runtime_ast, _type), do: runtime_ast
+
+  defp emit_map_to_runtime(map_ast, {:record, name, fields}) do
+    runtime_fields =
+      Enum.map(fields, fn {field_name, field_type} ->
+        field_value = quote do: Map.fetch!(unquote(map_ast), unquote(field_name))
+        emit_map_value_to_runtime(field_value, field_type)
+      end)
+
+    {:{}, [], [name | runtime_fields]}
+  end
+
+  defp emit_map_to_runtime(map_ast, _type), do: map_ast
+
+  defp emit_map_value_to_runtime(value_ast, {:record, name, fields}) do
+    emit_map_to_runtime(value_ast, {:record, name, fields})
+  end
+
+  defp emit_map_value_to_runtime(value_ast, {:list, {:record, name, fields}}) do
+    item_var = Macro.var(:item, nil)
+
+    quote do
+      Enum.map(unquote(value_ast), fn unquote(item_var) ->
+        unquote(emit_map_to_runtime(item_var, {:record, name, fields}))
+      end)
+    end
+  end
+
+  defp emit_map_value_to_runtime(value_ast, {:list, _elem_type}) do
+    value_ast
+  end
+
+  defp emit_map_value_to_runtime(value_ast, _type), do: value_ast
 
   defp emit_genserver(name, _initial_state, handlers) do
     module_name = scoped_module_name(name)

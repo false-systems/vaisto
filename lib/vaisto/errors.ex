@@ -299,6 +299,15 @@ defmodule Vaisto.Errors do
     )
   end
 
+  @doc "Prompt is missing a template required for code generation"
+  def prompt_missing_template(name, opts \\ []) do
+    Error.new("prompt missing template",
+      Keyword.merge(opts, [
+        note: "prompt `#{name}` requires a :template clause before it can be emitted"
+      ])
+    )
+  end
+
   @doc "Function not found"
   def unknown_function(name, known_names_or_opts \\ [])
 
